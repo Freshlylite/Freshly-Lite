@@ -52,7 +52,7 @@ async function handleEvent(req, res) {
 }
 
 async function sendMessage(recipientId, text, platform) {
-  const url = `https://graph.facebook.com/v20.0/me/messages?access_token=${process.env.META_PAGE_ACCESS_TOKEN}`;
+  const url = `https://graph.facebook.com/v20.0/me/messages?access_token=${process.env.META_ACCESS_TOKEN}`;
   try {
     await axios.post(url, {
       recipient: { id: recipientId },
@@ -64,7 +64,7 @@ async function sendMessage(recipientId, text, platform) {
 }
 
 async function replyToComment(commentId, text) {
-  const url = `https://graph.facebook.com/v20.0/${commentId}/comments?access_token=${process.env.META_PAGE_ACCESS_TOKEN}`;
+  const url = `https://graph.facebook.com/v20.0/${commentId}/comments?access_token=${process.env.META_ACCESS_TOKEN}`;
   try {
     await axios.post(url, { message: text });
   } catch (err) {
