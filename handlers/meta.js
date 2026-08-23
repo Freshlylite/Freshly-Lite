@@ -51,18 +51,39 @@ async function handleEvent(req, res) {
   }
 }
 
-async function sendMessage(recipientId, text, platform) {
-  const url = `https://graph.facebook.com/v20.0/me/messages?access_token=${process.env.META_ACCESS_TOKEN}`;
-  try {
-    await axios.post(url, {
-      recipient: { id: recipientId },
-      message: { text }
-    });
-  } catch (err) {
-    console.error(`خطأ بإرسال رسالة ${platform}:`, err.response?.data || err.message);
+async function generateReply(incomingMessage, platform, extra = {}) {
+  const message = String(incomingMessage || "").trim();
+
+  if (!message) {
+    return "مرحباً 👋 كيف يمكننا مساعدتك؟";
   }
+
+  const lower = message.toLowerCase();
+
+  if (
+    lower.includes("hello") ||
+    lower.includes("hi") ||
+    lower.includes("مرحبا") ||
+    lower.includes("مرحباً") ||
+    lower.includes("السلام")
+  ) {
+    return "أهلاً وسهلاً بك في Freshly Lite 👋 كيف يمكننا مساعدتك اليوم؟";
+  }
+
+  if (
+    lower.includes("menu") ||
+    lower.includes("منيو") ||
+    lower.includes("قائمة") ||
+    lower.includes("أسعار") ||
+    lower.includes("price")
+  ) {
+    return "يسعدنا مساعدتك 😊 أخبرنا ما الذي ترغب بطلبه أو الاستفسار عنه، وسنساعدك مباشرة.";
+  }
+
+  return "شكراً لتواصلك مع Freshly Lite 🌿 تم استلام رسالتك وسنساعدك بكل سرور.";
 }
 
+module.exports = { generateReply };
 async function replyToComment(commentId, text) {
   const url = `https://graph.facebook.com/v20.0/${commentId}/comments?access_token=${process.env.META_ACCESS_TOKEN}`;
   try {
