@@ -1,0 +1,20 @@
+{
+  "name": "social-media-agent",
+  "version": "1.0.0",
+  "description": "وكيل ذكاء اصطناعي يرد تلقائياً على انستقرام، فيسبوك، تيك توك، واتساب، وتقييمات جوجل",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "body-parser": "^1.20.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}
