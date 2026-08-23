@@ -1,44 +1,33 @@
-const axios = require("axios");
-
-/**
- * يولّد رد ذكي باستخدام Claude API بناءً على رسالة الزبون
- * @param {string} incomingMessage - رسالة الزبون
- * @param {string} platform - اسم المنصة (instagram, facebook, whatsapp, tiktok, google_review)
- * @param {object} extra - أي سياق إضافي (مثل تقييم بالنجوم لغوغل)
- */
 async function generateReply(incomingMessage, platform, extra = {}) {
-  const businessName = process.env.BUSINESS_NAME || "شركتنا";
-  const businessContext = process.env.BUSINESS_CONTEXT || "";
+  const message = String(incomingMessage || "").trim();
 
-  let systemPrompt = `انت مساعد خدمة عملاء لـ "${businessName}". 
-معلومات عن العمل: ${businessContext}
-مهمتك ترد على رسائل الزبائن من منصة ${platform} بشكل ودود، مختصر، ومهني باللهجة نفسها يلي حكى فيها الزبون (عربي فصيح أو عامي حسب رسالته).
-لا تخترع معلومات غير موجودة بالسياق أعلاه. إذا سؤال محتاج تفاصيل ما عندك ياها، اطلب من الزبون التواصل مباشرة مع الفريق.
-خلي الرد قصير (2-4 جمل كحد أقصى) ومناسب لمنصة تواصل اجتماعي.`;
-
-  if (platform === "google_review") {
-    systemPrompt += `\nهاي رسالة تقييم من جوجل${extra.rating ? ` بتقييم ${extra.rating} نجوم` : ""}. رد بامتنان، وإذا كان التقييم سلبي اعتذر بلطف واعرض حل المشكلة.`;
+  if (!message) {
+    return "مرحباً 👋 كيف يمكننا مساعدتك؟";
   }
 
-  const response = await axios.post(
-    "https://api.anthropic.com/v1/messages",
-    {
-      model: "claude-sonnet-4-6",
-      max_tokens: 300,
-      system: systemPrompt,
-      messages: [{ role: "user", content: incomingMessage }]
-    },
-    {
-      headers: {
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json"
-      }
-    }
-  );
+  const lower = message.toLowerCase();
 
-  const textBlock = response.data.content.find((b) => b.type === "text");
-  return textBlock ? textBlock.text.trim() : "شكراً لتواصلك معنا!";
+  if (
+    lower.includes("hello") ||
+    lower.includes("hi") ||
+    lower.includes("مرحبا") ||
+    lower.includes("مرحباً") ||
+    lower.includes("السلام")
+  ) {
+    return "أهلاً وسهلاً بك في Freshly Lite 👋 كيف يمكننا مساعدتك اليوم؟";
+  }
+
+  if (
+    lower.includes("menu") ||
+    lower.includes("منيو") ||
+    lower.includes("قائمة") ||
+    lower.includes("أسعار") ||
+    lower.includes("price")
+  ) {
+    return "يسعدنا مساعدتك 😊 أخبرنا ما الذي ترغب بطلبه أو الاستفسار عنه، وسنساعدك مباشرة.";
+  }
+
+  return "شكراً لتواصلك مع Freshly Lite 🌿 تم استلام رسالتك وسنساعدك بكل سرور.";
 }
 
 module.exports = { generateReply };
