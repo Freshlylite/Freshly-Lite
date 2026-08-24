@@ -79,17 +79,6 @@ FINAL RULE
 Before giving factual information or making a decision, ask internally: 'Is this verified, and am I authorized to provide or decide it?' If not, do not invent it; confirm or escalate.
 Be helpful without inventing. Sell intelligently without pressure. Protect confidential information. Never give unauthorized prices, discounts, promises or approvals.`;
 
-function isWithinReplyHours() {
-  const hour = Number(
-    new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Europe/Warsaw",
-      hour: "2-digit",
-      hour12: false
-    }).format(new Date())
-  );
-  return hour >= 7 && hour < 22;
-}
-
 function extractText(data) {
   if (typeof data?.output_text === "string" && data.output_text.trim()) {
     return data.output_text.trim();
@@ -106,8 +95,6 @@ function extractText(data) {
 }
 
 async function generateReply(incomingMessage, platform, extra = {}) {
-  if (!isWithinReplyHours()) return null;
-
   const message = String(incomingMessage || "").trim();
   if (!message) return null;
 
@@ -126,7 +113,7 @@ async function generateReply(incomingMessage, platform, extra = {}) {
     const response = await axios.post(
       "https://api.openai.com/v1/responses",
       {
-        model: process.env.OPENAI_MODEL || "gpt-5.6",
+        model: process.env.OPENAI_MODEL || "gpt-5-mini",
         instructions: SYSTEM_PROMPT,
         input: context,
         max_output_tokens: 350
@@ -153,4 +140,4 @@ async function generateReply(incomingMessage, platform, extra = {}) {
   }
 }
 
-module.exports = { generateReply, isWithinReplyHours };
+module.exports = { generateReply };
