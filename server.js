@@ -4,13 +4,51 @@ const bodyParser = require("body-parser");
 
 const meta = require("./handlers/meta");
 const whatsapp = require("./handlers/whatsapp");
+const { generateReply } = require("./services/aiReply");
 
 const app = express();
 app.use(bodyParser.json());
 
-// صفحة رئيسية بسيطة للتأكد إن السيرفر شغال
 app.get("/", (req, res) => {
   res.send("✅ Social Media Agent شغال تمام");
+});
+
+// Health check: confirms configuration without exposing secrets.
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
+    model: process.env.OPENAI_MODEL || "not-set",
+    metaConfigured: Boolean(process.env.META_ACCESS_TOKEN),
+    whatsappConfigured: Boolean(process.env.WHATSAPP_ACCESS_TOKEN)
+  });
+});
+
+// Temporary fixed-message AI test. Enable only with ENABLE_TEST_ENDPOINT=true.
+// It does not accept arbitrary user input, which limits accidental API usage.
+app.get("/test-agent", async (req, res) => {
+  if (process.env.ENABLE_TEST_ENDPOINT !== "true") {
+    return res.status(404).send("Not Found");
+  }
+
+  try {
+    const reply = await generateReply(
+      "مرحبا، أول مرة بدي جرب مطعمكم وما بعرف شو أطلب. شو بتنصحني؟",
+      "internal_test"
+    );
+
+    if (!reply) {
+      return res.status(503).json({
+        ok: false,
+        message: "Agent returned no reply. Check Render logs and reply hours."
+      });
+    }
+
+    return res.json({ ok: true, reply });
+  } catch (err) {
+    console.error("Test endpoint error:", err.message);
+    return res.status(500).json({ ok: false, message: "Agent test failed" });
+  }
 });
 
 app.get("/privacy", (req, res) => {
@@ -23,11 +61,12 @@ app.get("/privacy", (req, res) => {
     <p>Contact: info@freshlylite.com</p>
   `);
 });
-// ===== فيسبوك + انستقرام (نفس webhook لأنهم من Meta) =====
+
+// ===== Facebook + Instagram =====
 app.get("/webhook/meta", meta.verifyWebhook);
 app.post("/webhook/meta", meta.handleEvent);
 
-// ===== واتساب =====
+// ===== WhatsApp =====
 app.get("/webhook/whatsapp", whatsapp.verifyWebhook);
 app.post("/webhook/whatsapp", whatsapp.handleEvent);
 
