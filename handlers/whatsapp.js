@@ -25,9 +25,9 @@ async function handleEvent(req, res) {
   for (const msg of messages) {
     const from = msg.from;
     const text = msg.text?.body;
-    if (text) {
+    if (from && text) {
       const reply = await generateReply(text, "whatsapp");
-      await sendWhatsAppMessage(from, reply);
+      if (reply) await sendWhatsAppMessage(from, reply);
     }
   }
 }
