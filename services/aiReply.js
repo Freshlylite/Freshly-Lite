@@ -80,24 +80,19 @@ Before giving factual information or making a decision, ask internally: 'Is this
 Be helpful without inventing. Sell intelligently without pressure. Protect confidential information. Never give unauthorized prices, discounts, promises or approvals.`;
 
 function extractText(data) {
-  if (typeof data?.output_text === "string" && data.output_text.trim()) {
-    return data.output_text.trim();
-  }
-
+  if (typeof data?.output_text === "string" && data.output_text.trim()) return data.output_text.trim();
   for (const item of data?.output || []) {
     if (item?.type !== "message") continue;
     for (const part of item?.content || []) {
       if (part?.type === "output_text" && part?.text) return part.text.trim();
     }
   }
-
   return null;
 }
 
 async function generateReply(incomingMessage, platform, extra = {}) {
   const message = String(incomingMessage || "").trim();
   if (!message) return null;
-
   if (!process.env.OPENAI_API_KEY) {
     console.error("OPENAI_API_KEY is missing");
     return null;
@@ -116,7 +111,9 @@ async function generateReply(incomingMessage, platform, extra = {}) {
         model: process.env.OPENAI_MODEL || "gpt-5-mini",
         instructions: SYSTEM_PROMPT,
         input: context,
-        max_output_tokens: 350
+        reasoning: { effort: "minimal" },
+        text: { verbosity: "low" },
+        max_output_tokens: 700
       },
       {
         headers: {
@@ -129,10 +126,13 @@ async function generateReply(incomingMessage, platform, extra = {}) {
 
     const reply = extractText(response.data);
     if (!reply) {
-      console.error("OpenAI returned no text output");
+      console.error("OpenAI returned no text output", {
+        status: response.data?.status,
+        incomplete_details: response.data?.incomplete_details,
+        output_types: (response.data?.output || []).map(item => item?.type)
+      });
       return null;
     }
-
     return reply;
   } catch (err) {
     console.error("OpenAI error:", err.response?.data || err.message);
