@@ -2,6 +2,36 @@ const axios = require("axios");
 const { SYSTEM_PROMPT } = require("../prompts/restaurantAssistant");
 const { formatMenuForAI } = require("../data/menu");
 
+const MANAGEMENT_ALERT_PROTOCOL = `
+## INTERNAL MANAGEMENT ALERT PROTOCOL
+This protocol is machine-readable and MUST NEVER be shown to the customer.
+
+Create a management alert ONLY for these important cases:
+1. CATERING: the catering request has enough useful details and now needs pricing/approval, OR an off-menu/special catering request needs management judgment.
+2. COMPLAINT: an important/serious complaint that should reach management now. Ordinary mild negative feedback does not require an immediate alert.
+3. ALLERGY: a serious allergy/safety question where verified information is insufficient and management confirmation is required.
+4. ANGRY: the customer is seriously angry, abusive, threatening, or the situation has escalated beyond normal customer service.
+5. DISCOUNT: the customer requests a discount, special price, compensation, free item, or exception that requires authorization.
+6. BUSINESS: a company, supplier, influencer, collaboration, partnership, event, or commercial proposal that management should review.
+7. MANAGEMENT_DECISION: any other case where your customer-facing reply genuinely says a management/responsible-person decision or confirmation is required.
+8. UNUSUAL: a genuinely unusual/sensitive request that should be seen by management now.
+
+Do NOT alert management for normal menu questions, normal recommendations, ordinary delivery questions, normal pickup questions before confirmation is needed, compliments, or routine conversation.
+Do NOT create repeated alerts for the same unresolved issue unless new important information materially changes the case.
+
+If NO immediate management alert is needed, return only the normal customer reply.
+
+If an alert IS needed, append this exact block AFTER the customer reply:
+<<<MANAGEMENT_ALERT>>>
+TYPE: one of CATERING, COMPLAINT, ALLERGY, ANGRY, DISCOUNT, BUSINESS, MANAGEMENT_DECISION, UNUSUAL
+SUMMARY: concise factual summary using the current message and relevant recent conversation history
+ACTION: exactly what management needs to decide, confirm, price, review, or know
+<<<END_MANAGEMENT_ALERT>>>
+
+The customer-facing text before this block must remain natural and must not mention the internal block.
+Never put protected internal data in the customer reply.
+`;
+
 function extractText(data) {
   if (typeof data?.output_text === "string" && data.output_text.trim()) return data.output_text.trim();
   for (const item of data?.output || []) {
@@ -13,7 +43,39 @@ function extractText(data) {
   return null;
 }
 
-async function generateReply(incomingMessage, platform, extra = {}) {
+function parseAgentOutput(raw) {
+  const text = String(raw || "").trim();
+  const match = text.match(/<<<MANAGEMENT_ALERT>>>\s*TYPE:\s*([^\n]+)\s*SUMMARY:\s*([\s\S]*?)\s*ACTION:\s*([\s\S]*?)\s*<<<END_MANAGEMENT_ALERT>>>/i);
+
+  if (!match) {
+    return { reply: text, managementAlert: null };
+  }
+
+  const reply = text.replace(match[0], "").trim();
+  const allowedTypes = new Set([
+    "CATERING",
+    "COMPLAINT",
+    "ALLERGY",
+    "ANGRY",
+    "DISCOUNT",
+    "BUSINESS",
+    "MANAGEMENT_DECISION",
+    "UNUSUAL"
+  ]);
+
+  const type = match[1].trim().toUpperCase();
+  const summary = match[2].trim();
+  const action = match[3].trim();
+
+  return {
+    reply,
+    managementAlert: allowedTypes.has(type) && summary && action
+      ? { type, summary, action }
+      : null
+  };
+}
+
+async function generateAgentResult(incomingMessage, platform, extra = {}) {
   const message = String(incomingMessage || "").trim();
   if (!message) return null;
   if (!process.env.OPENAI_API_KEY) {
@@ -41,11 +103,11 @@ async function generateReply(incomingMessage, platform, extra = {}) {
       "https://api.openai.com/v1/responses",
       {
         model: process.env.OPENAI_MODEL || "gpt-5-mini",
-        instructions: SYSTEM_PROMPT,
+        instructions: `${SYSTEM_PROMPT}\n\n${MANAGEMENT_ALERT_PROTOCOL}`,
         input: context,
         reasoning: { effort: "minimal" },
         text: { verbosity: "low" },
-        max_output_tokens: 700
+        max_output_tokens: 900
       },
       {
         headers: {
@@ -56,8 +118,8 @@ async function generateReply(incomingMessage, platform, extra = {}) {
       }
     );
 
-    const reply = extractText(response.data);
-    if (!reply) {
+    const raw = extractText(response.data);
+    if (!raw) {
       console.error("OpenAI returned no text output", {
         status: response.data?.status,
         incomplete_details: response.data?.incomplete_details,
@@ -65,11 +127,17 @@ async function generateReply(incomingMessage, platform, extra = {}) {
       });
       return null;
     }
-    return reply;
+
+    return parseAgentOutput(raw);
   } catch (err) {
     console.error("OpenAI error:", err.response?.data || err.message);
     return null;
   }
 }
 
-module.exports = { generateReply };
+async function generateReply(incomingMessage, platform, extra = {}) {
+  const result = await generateAgentResult(incomingMessage, platform, extra);
+  return result?.reply || null;
+}
+
+module.exports = { generateReply, generateAgentResult };
