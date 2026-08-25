@@ -1,5 +1,12 @@
 const axios = require("axios");
-const { generateReply } = require("../services/aiReply");
+const { generateAgentResult } = require("../services/aiReply");
+
+// Short in-memory WhatsApp context. This survives normal messages on the same
+// running instance, but is intentionally not treated as permanent customer memory.
+const conversations = new Map();
+const recentAlerts = new Map();
+const MAX_HISTORY_MESSAGES = 12;
+const ALERT_DEDUPE_MS = 30 * 60 * 1000;
 
 function verifyWebhook(req, res) {
   const mode = req.query["hub.mode"];
@@ -11,6 +18,49 @@ function verifyWebhook(req, res) {
     return res.status(200).send(challenge);
   }
   return res.sendStatus(403);
+}
+
+function getHistory(customerNumber) {
+  return conversations.get(customerNumber) || [];
+}
+
+function saveHistory(customerNumber, history) {
+  conversations.set(customerNumber, history.slice(-MAX_HISTORY_MESSAGES));
+}
+
+function shouldSendAlert(customerNumber, alert) {
+  const key = `${customerNumber}:${alert.type}`;
+  const previous = recentAlerts.get(key);
+  const fingerprint = `${alert.summary}|${alert.action}`.toLowerCase().replace(/\s+/g, " ").trim();
+  const now = Date.now();
+
+  if (previous && previous.fingerprint === fingerprint && now - previous.sentAt < ALERT_DEDUPE_MS) {
+    return false;
+  }
+
+  recentAlerts.set(key, { fingerprint, sentAt: now });
+  return true;
+}
+
+function formatManagementAlert(customerNumber, alert) {
+  const labels = {
+    CATERING: "🍽️ طلب كاترينغ يحتاج إدارة",
+    COMPLAINT: "🚨 شكوى مهمة",
+    ALLERGY: "⚠️ سؤال حساسية يحتاج تأكيد",
+    ANGRY: "🔥 عميل غاضب / حالة متصاعدة",
+    DISCOUNT: "💰 خصم أو استثناء يحتاج موافقة",
+    BUSINESS: "🤝 عرض شركة / مؤثر / تعاون",
+    MANAGEMENT_DECISION: "📌 قرار إدارة مطلوب",
+    UNUSUAL: "❗ حالة غير اعتيادية"
+  };
+
+  return [
+    labels[alert.type] || "🔔 تنبيه إدارة",
+    "",
+    `رقم العميل: ${customerNumber}`,
+    `الملخص: ${alert.summary}`,
+    `المطلوب منك: ${alert.action}`
+  ].join("\n");
 }
 
 async function handleEvent(req, res) {
@@ -27,7 +77,7 @@ async function handleEvent(req, res) {
     const text = msg.text?.body?.trim();
     if (!from || !text) continue;
 
-    // Temporary management-alert test. This is intercepted before AI processing.
+    // Keep the working test route for diagnostics.
     if (text.toUpperCase() === "TEST_ALERT") {
       const sent = await sendManagementAlert(
         `🔔 اختبار تنبيه الإدارة من Freshly Lite\n\nرقم المُرسل: ${from}\nالحالة: نظام تنبيهات الإدارة يعمل.`
@@ -41,8 +91,31 @@ async function handleEvent(req, res) {
       continue;
     }
 
-    const reply = await generateReply(text, "whatsapp");
-    if (reply) await sendWhatsAppMessage(from, reply);
+    const history = getHistory(from);
+    const result = await generateAgentResult(text, "whatsapp", { history });
+    if (!result) continue;
+
+    if (result.reply) {
+      await sendWhatsAppMessage(from, result.reply);
+    }
+
+    const updatedHistory = [
+      ...history,
+      { role: "user", content: text },
+      ...(result.reply ? [{ role: "assistant", content: result.reply }] : [])
+    ];
+    saveHistory(from, updatedHistory);
+
+    if (result.managementAlert && shouldSendAlert(from, result.managementAlert)) {
+      const alertText = formatManagementAlert(from, result.managementAlert);
+      const sent = await sendManagementAlert(alertText);
+      if (!sent) {
+        console.error("Management alert was generated but could not be delivered", {
+          customer: from,
+          type: result.managementAlert.type
+        });
+      }
+    }
   }
 }
 
