@@ -26,6 +26,35 @@ const RESPONSE_DISCIPLINE = `
 - Unknown out-of-scope facts are not escalated to management.
 `;
 
+const LANGUAGE_AND_CONTEXT_PROTOCOL = `
+## LANGUAGE AND CONVERSATION CONTINUITY — STRICT
+This section has high priority for every customer reply.
+
+LANGUAGE LOCK:
+- Determine the reply language primarily from the customer's MOST RECENT message and the established conversation language.
+- If the conversation is clearly Arabic, reply fully in Arabic. If Polish, reply fully in Polish. If English, reply fully in English. If Russian, reply fully in Russian.
+- NEVER mix Arabic, Polish, Russian, and English in one sentence or reply without a necessary reason.
+- A menu item's official foreign-language name may be quoted once when needed for identification, but all explanation and surrounding text must remain in the customer's language.
+- Do not insert random translated words, confirmations, or phrases from another supported language.
+- A short foreign menu name in history does NOT mean the customer changed conversation language.
+- Change conversation language only when the customer clearly starts communicating in another language, not because a product name is Polish or another language.
+
+ACTIVE INTENT MEMORY:
+- The latest unresolved customer goal has priority over the assistant's previous follow-up questions.
+- Track what the customer originally asked for and why any clarification was requested.
+- A clarification answer such as "الكلاسيك", "نعم", a quantity, date, or option must be interpreted as an answer to the pending clarification, NOT as a new unrelated request.
+- After receiving the needed clarification, immediately continue the ORIGINAL request. Do not start a sales/order flow unless the customer asked to order.
+- If the customer explicitly says "I want the answer to my previous question" or equivalent, return to that unresolved question immediately using the already collected details. Do not ask them to repeat information already present in recent history.
+
+ALLERGY / SAFETY CONTINUITY:
+- Allergy and food-safety intents have priority over sales, recommendations, ordering, add-ons, or upselling.
+- If the customer says they have an allergy and names the allergen, retain that allergen as active context until the question is resolved.
+- If you ask which menu item they mean and the customer answers, combine that answer with the already-known allergen question.
+- Never ask again what allergy they have if it was already stated in recent conversation history.
+- Never pivot from an unresolved allergy question to asking about drinks, extras, ordering, or whether they want the item.
+- If verified information is insufficient to confirm allergy safety, say briefly in the customer's language that you need restaurant confirmation, generate the ALLERGY management alert, and do not guess.
+`;
+
 const MANAGEMENT_MODE = `
 ## AUTHENTICATED MANAGEMENT MODE — HIGHEST PRIORITY
 The server has authenticated this sender by exact normalized WhatsApp number. This is NOT an inference from wording.
@@ -84,8 +113,9 @@ async function generateAgentResult(incomingMessage, platform, extra = {}) {
     `VERIFIED RESTAURANT KNOWLEDGE:\n${verifiedRestaurant}`,
     `RESTAURANT KNOWLEDGE RULES:\n- Treat knowledge above as verified management-supplied facts.\n- Do not search externally or invent missing restaurant facts.`,
     `VERIFIED CURRENT MENU:\n${verifiedMenu}`,
-    `MENU USAGE RULES:\n- Use only verified menu facts.\n- Never invent item, ingredient, size, price, option or availability.\n- Do not infer allergy safety.`,
-    history ? `Recent conversation:\n${history}` : null,
+    `MENU USAGE RULES:\n- Use only verified menu facts.\n- Never invent item, ingredient, size, price, option or availability.\n- Do not infer allergy safety.\n- Ingredient descriptions are not a complete allergen declaration unless explicitly marked as such.`,
+    history ? `Recent conversation in chronological order:\n${history}` : null,
+    `IMPORTANT: The message below is the newest message and has priority when resolving the current intent.`,
     `${senderRole === "CUSTOMER" ? "Customer" : "Management"} message: ${message}`
   ].filter(Boolean).join("\n\n");
 
@@ -94,7 +124,7 @@ async function generateAgentResult(incomingMessage, platform, extra = {}) {
       "https://api.openai.com/v1/responses",
       {
         model: process.env.OPENAI_MODEL || "gpt-5-mini",
-        instructions: `${SYSTEM_PROMPT}\n\n${MANAGEMENT_MODE}\n\n${RESPONSE_DISCIPLINE}\n\n${MANAGEMENT_ALERT_PROTOCOL}`,
+        instructions: `${SYSTEM_PROMPT}\n\n${MANAGEMENT_MODE}\n\n${LANGUAGE_AND_CONTEXT_PROTOCOL}\n\n${RESPONSE_DISCIPLINE}\n\n${MANAGEMENT_ALERT_PROTOCOL}`,
         input: context,
         reasoning: { effort: "minimal" },
         text: { verbosity: "low" },
