@@ -1,12 +1,8 @@
 const axios = require("axios");
 const { generateAgentResult } = require("../services/aiReply");
 const { formatManagementDecisionForCustomer } = require("../services/managementReply");
+const storage = require("../services/storage");
 
-const conversations = new Map();
-const recentAlerts = new Map();
-const openCases = new Map();
-let caseSequence = 1;
-const MAX_HISTORY_MESSAGES = 12;
 const ALERT_DEDUPE_MS = 30 * 60 * 1000;
 
 function normalizePhone(value) {
@@ -37,65 +33,23 @@ function verifyWebhook(req, res) {
   return res.sendStatus(403);
 }
 
-function getHistory(key) {
-  return conversations.get(key) || [];
-}
-
-function saveHistory(key, history) {
-  conversations.set(key, history.slice(-MAX_HISTORY_MESSAGES));
-}
-
-function createCaseId() {
-  const date = new Date().toISOString().slice(2, 10).replace(/-/g, "");
-  const seq = String(caseSequence++).padStart(3, "0");
-  return `FL-${date}-${seq}`;
-}
-
-function createOrRefreshCase(customerNumber, alert) {
-  const existing = [...openCases.values()]
-    .filter(c => c.customerNumber === customerNumber && c.status === "OPEN" && c.type === alert.type)
-    .sort((a, b) => b.updatedAt - a.updatedAt)[0];
-  if (existing) {
-    existing.summary = alert.summary;
-    existing.action = alert.action;
-    existing.updatedAt = Date.now();
-    return existing;
-  }
-  const item = {
-    id: createCaseId(),
-    customerNumber,
-    type: alert.type,
-    summary: alert.summary,
-    action: alert.action,
-    status: "OPEN",
-    createdAt: Date.now(),
-    updatedAt: Date.now()
-  };
-  openCases.set(item.id, item);
-  return item;
-}
-
-function getOpenCases() {
-  return [...openCases.values()].filter(c => c.status === "OPEN").sort((a, b) => b.updatedAt - a.updatedAt);
-}
-
-function resolveCaseReference(text) {
+async function resolveCaseReference(text) {
   const raw = String(text || "");
-  const explicit = raw.match(/FL-\d{6}-\d{3}/i)?.[0]?.toUpperCase();
-  if (explicit) return openCases.get(explicit)?.status === "OPEN" ? openCases.get(explicit) : null;
+  const explicit = raw.match(/FL-\d{6}-\d{6}/i)?.[0]?.toUpperCase();
+  if (explicit) return storage.getOpenCaseById(explicit);
 
   const customerDigits = normalizePhone(raw);
   if (customerDigits.length >= 9) {
-    const byPhone = getOpenCases().filter(c => c.customerNumber === customerDigits || c.customerNumber.endsWith(customerDigits) || customerDigits.endsWith(c.customerNumber));
+    const byPhone = await storage.getOpenCasesByPhone(customerDigits);
     if (byPhone.length === 1) return byPhone[0];
   }
 
-  const open = getOpenCases();
+  const open = await storage.getOpenCases();
   return open.length === 1 ? open[0] : null;
 }
 
 function stripCaseReference(text) {
-  return String(text || "").replace(/FL-\d{6}-\d{3}/ig, "").trim();
+  return String(text || "").replace(/FL-\d{6}-\d{6}/ig, "").trim();
 }
 
 function parseManagementSendCommand(text) {
@@ -114,16 +68,6 @@ function parseManagementSendCommand(text) {
   return decision ? { decision, exact } : null;
 }
 
-function shouldSendAlert(customerNumber, alert) {
-  const key = `${customerNumber}:${alert.type}`;
-  const previous = recentAlerts.get(key);
-  const fingerprint = `${alert.summary}|${alert.action}`.toLowerCase().replace(/\s+/g, " ").trim();
-  const now = Date.now();
-  if (previous && previous.fingerprint === fingerprint && now - previous.sentAt < ALERT_DEDUPE_MS) return false;
-  recentAlerts.set(key, { fingerprint, sentAt: now });
-  return true;
-}
-
 function formatManagementAlert(caseItem) {
   const labels = {
     CATERING: "🍽️ طلب كاترينغ يحتاج إدارة",
@@ -138,21 +82,22 @@ function formatManagementAlert(caseItem) {
   return [
     labels[caseItem.type] || "🔔 تنبيه إدارة",
     `الحالة: ${caseItem.id}`,
+    caseItem.customerCode ? `رقم العميل الداخلي: ${caseItem.customerCode}` : null,
     `رقم العميل: ${caseItem.customerNumber}`,
     `الملخص: ${caseItem.summary}`,
     `المطلوب منك: ${caseItem.action}`,
     "",
     `للرد: اكتب ${caseItem.id} ثم أمر واضح مثل: «ابعث للزبون: ...»`
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 async function executeOwnerCommand(from, text) {
   const parsed = parseManagementSendCommand(text);
   if (!parsed) return false;
 
-  const caseItem = resolveCaseReference(text);
+  const caseItem = await resolveCaseReference(text);
   if (!caseItem) {
-    const open = getOpenCases();
+    const open = await storage.getOpenCases();
     const hint = open.length > 1
       ? `عندي ${open.length} حالات مفتوحة. اكتب رقم الحالة مع الأمر، مثلاً: ${open[0].id} ابعث للزبون: ...`
       : "ما لقيت حالة مفتوحة مرتبطة بهذا الأمر. أرسل رقم الحالة الموجود في تنبيه الإدارة مع نص الرد.";
@@ -160,8 +105,7 @@ async function executeOwnerCommand(from, text) {
     return true;
   }
 
-  const customerHistoryKey = `CUSTOMER:${caseItem.customerNumber}`;
-  const customerHistory = getHistory(customerHistoryKey);
+  const customerHistory = await storage.getHistory(caseItem.customerNumber, 12);
   const customerMessage = await formatManagementDecisionForCustomer({
     decision: parsed.decision,
     customerHistory,
@@ -181,14 +125,16 @@ async function executeOwnerCommand(from, text) {
     return true;
   }
 
-  saveHistory(customerHistoryKey, [
-    ...customerHistory,
-    { role: "assistant", content: customerMessage }
-  ]);
-  caseItem.status = "CLOSED";
-  caseItem.updatedAt = Date.now();
-  caseItem.closedBy = from;
-  caseItem.managementDecision = parsed.decision;
+  await storage.addMessage({
+    phone: caseItem.customerNumber,
+    senderRole: "CUSTOMER",
+    role: "assistant",
+    content: customerMessage
+  });
+  await storage.closeCase(caseItem.id, {
+    closedBy: from,
+    managementDecision: parsed.decision
+  });
   await sendWhatsAppMessage(from, `✅ ${caseItem.id}: تم إرسال الرد للعميل ${caseItem.customerNumber} وإغلاق الحالة.`);
   return true;
 }
@@ -205,6 +151,12 @@ async function handleEvent(req, res) {
     const text = msg.text?.body?.trim();
     if (!from || !text) continue;
 
+    const claimed = await storage.claimInboundEvent(msg.id || null);
+    if (!claimed) {
+      console.log("Duplicate WhatsApp event ignored:", msg.id);
+      continue;
+    }
+
     const senderRole = getSenderRole(from);
     console.log(`WhatsApp sender role: ${senderRole} (${from})`);
 
@@ -214,25 +166,32 @@ async function handleEvent(req, res) {
       continue;
     }
 
-    // OWNER execution is deterministic. Do not send clear commands to the customer-service AI first.
-    if (senderRole === "OWNER" && await executeOwnerCommand(from, text)) continue;
+    if (senderRole === "OWNER" && await executeOwnerCommand(from, text)) {
+      await storage.addMessage({ phone: from, senderRole, role: "user", content: text, externalMessageId: msg.id || null });
+      continue;
+    }
 
-    const historyKey = `${senderRole}:${from}`;
-    const history = getHistory(historyKey);
+    if (senderRole === "CUSTOMER") await storage.ensureCustomer(from);
+    const history = await storage.getHistory(from, 12);
     const result = await generateAgentResult(text, "whatsapp", { history, senderRole, senderNumber: from });
     if (!result) continue;
 
-    if (result.reply) await sendWhatsAppMessage(from, result.reply);
-    saveHistory(historyKey, [
-      ...history,
-      { role: "user", content: text },
-      ...(result.reply ? [{ role: "assistant", content: result.reply }] : [])
-    ]);
+    await storage.addMessage({ phone: from, senderRole, role: "user", content: text, externalMessageId: msg.id || null });
 
-    if (senderRole === "CUSTOMER" && result.managementAlert && shouldSendAlert(from, result.managementAlert)) {
-      const caseItem = createOrRefreshCase(from, result.managementAlert);
-      const sent = await sendManagementAlert(formatManagementAlert(caseItem));
-      if (!sent) console.error("Management alert was generated but could not be delivered", { customer: from, type: result.managementAlert.type, caseId: caseItem.id });
+    if (result.reply) {
+      const sent = await sendWhatsAppMessage(from, result.reply);
+      if (sent) {
+        await storage.addMessage({ phone: from, senderRole, role: "assistant", content: result.reply });
+      }
+    }
+
+    if (senderRole === "CUSTOMER" && result.managementAlert) {
+      const shouldAlert = await storage.shouldSendAlert(from, result.managementAlert, ALERT_DEDUPE_MS);
+      if (shouldAlert) {
+        const caseItem = await storage.createOrRefreshCase(from, result.managementAlert);
+        const sent = await sendManagementAlert(formatManagementAlert(caseItem));
+        if (!sent) console.error("Management alert was generated but could not be delivered", { customer: from, type: result.managementAlert.type, caseId: caseItem.id });
+      }
     }
   }
 }
