@@ -52,6 +52,23 @@ async function initStorage() {
     CREATE INDEX IF NOT EXISTS idx_cases_customer
       ON cases(customer_phone, status, updated_at DESC);
 
+    CREATE TABLE IF NOT EXISTS discount_codes (
+      code TEXT PRIMARY KEY,
+      case_id TEXT UNIQUE NOT NULL REFERENCES cases(id),
+      customer_phone TEXT NOT NULL,
+      customer_id BIGINT REFERENCES customers(id),
+      discount_percent NUMERIC(5,2) NOT NULL,
+      valid_from DATE NOT NULL,
+      valid_until DATE NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (discount_percent > 0 AND discount_percent <= 100),
+      CHECK (valid_until >= valid_from)
+    );
+    CREATE INDEX IF NOT EXISTS idx_discount_customer
+      ON discount_codes(customer_phone, status, valid_until DESC);
+
     CREATE TABLE IF NOT EXISTS alert_dedupe (
       alert_key TEXT PRIMARY KEY,
       fingerprint TEXT NOT NULL,
@@ -209,6 +226,33 @@ async function closeCase(caseId, { closedBy, managementDecision }) {
   return mapCase(result.rows[0]);
 }
 
+async function discountCodeExists(code) {
+  const result = await pool.query(`SELECT 1 FROM discount_codes WHERE code = $1 LIMIT 1`, [code]);
+  return result.rowCount > 0;
+}
+
+async function createDiscountCode({ code, caseId, customerPhone, customerId, discountPercent, validFrom, validUntil, createdBy }) {
+  const result = await pool.query(
+    `INSERT INTO discount_codes(
+      code, case_id, customer_phone, customer_id, discount_percent,
+      valid_from, valid_until, status, created_by
+    ) VALUES($1,$2,$3,$4,$5,$6,$7,'ACTIVE',$8)
+    ON CONFLICT (case_id) DO UPDATE SET
+      code = discount_codes.code
+    RETURNING *`,
+    [code, caseId, customerPhone, customerId || null, discountPercent, validFrom, validUntil, createdBy || null]
+  );
+  return result.rows[0];
+}
+
+async function getDiscountCodeByCase(caseId) {
+  const result = await pool.query(
+    `SELECT * FROM discount_codes WHERE case_id = $1 LIMIT 1`,
+    [caseId]
+  );
+  return result.rows[0] || null;
+}
+
 async function shouldSendAlert(customerNumber, alert, dedupeMs) {
   const alertKey = `${customerNumber}:${alert.type}`;
   const fingerprint = `${alert.summary}|${alert.action}`.toLowerCase().replace(/\s+/g, " ").trim();
@@ -250,5 +294,8 @@ module.exports = {
   getOpenCaseById,
   getOpenCasesByPhone,
   closeCase,
+  discountCodeExists,
+  createDiscountCode,
+  getDiscountCodeByCase,
   shouldSendAlert
 };
