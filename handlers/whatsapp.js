@@ -1,9 +1,11 @@
 const axios = require("axios");
+const crypto = require("crypto");
 const { generateAgentResult } = require("../services/aiReply");
 const { formatManagementDecisionForCustomer } = require("../services/managementReply");
 const storage = require("../services/storage");
 
 const ALERT_DEDUPE_MS = 30 * 60 * 1000;
+const DISCOUNT_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 function normalizePhone(value) {
   return String(value || "").replace(/\D/g, "");
@@ -68,6 +70,159 @@ function parseManagementSendCommand(text) {
   return decision ? { decision, exact } : null;
 }
 
+function parseArabicNumberWord(value) {
+  const words = {
+    واحد: 1, واحدة: 1,
+    اثنين: 2, اثنان: 2, اتنين: 2, اثنتين: 2,
+    ثلاثة: 3, ثلاث: 3,
+    اربعة: 4, أربعة: 4, اربع: 4, أربع: 4,
+    خمسة: 5, خمس: 5,
+    ستة: 6, ست: 6,
+    سبعة: 7, سبع: 7,
+    ثمانية: 8, ثمان: 8,
+    تسعة: 9, تسع: 9,
+    عشرة: 10, عشر: 10
+  };
+  return words[value] || null;
+}
+
+function extractDiscountPercent(text) {
+  const raw = String(text || "");
+  const direct = raw.match(/(?:خصم\s*)?(\d{1,3}(?:[.,]\d+)?)\s*%/i)
+    || raw.match(/خصم\s*(\d{1,3}(?:[.,]\d+)?)\s*(?:بالمية|بالمئة|في\s*المية|في\s*المئة)/i);
+  if (!direct) return null;
+  const value = Number(direct[1].replace(",", "."));
+  return value > 0 && value <= 100 ? value : null;
+}
+
+function extractDurationDays(text) {
+  const raw = String(text || "").toLowerCase();
+  if (/(اسبوعين|أسبوعين|اسبوعان|أسبوعان)/i.test(raw)) return 14;
+  if (/(اسبوع|أسبوع)\s*(واحد|واحدة)?/i.test(raw)) return 7;
+  if (/(شهرين|شهران)/i.test(raw)) return 60;
+  if (/شهر\s*(واحد|واحدة)?/i.test(raw)) return 30;
+
+  const numeric = raw.match(/(\d{1,3})\s*(يوم|ايام|أيام|اسبوع|أسبوع|اسابيع|أسابيع|شهر|اشهر|أشهر)/i);
+  if (numeric) {
+    const n = Number(numeric[1]);
+    const unit = numeric[2];
+    if (/يوم|ايام|أيام/i.test(unit)) return n;
+    if (/اسبوع|أسبوع|اسابيع|أسابيع/i.test(unit)) return n * 7;
+    if (/شهر|اشهر|أشهر/i.test(unit)) return n * 30;
+  }
+
+  const word = raw.match(/(واحد|واحدة|اثنين|اثنان|اتنين|اثنتين|ثلاثة|ثلاث|اربعة|أربعة|اربع|أربع|خمسة|خمس|ستة|ست|سبعة|سبع|ثمانية|ثمان|تسعة|تسع|عشرة|عشر)\s*(ايام|أيام|اسابيع|أسابيع|اشهر|أشهر)/i);
+  if (word) {
+    const n = parseArabicNumberWord(word[1]);
+    if (!n) return null;
+    if (/ايام|أيام/i.test(word[2])) return n;
+    if (/اسابيع|أسابيع/i.test(word[2])) return n * 7;
+    if (/اشهر|أشهر/i.test(word[2])) return n * 30;
+  }
+  return null;
+}
+
+function warsawDateParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Warsaw",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(date);
+  const get = type => parts.find(p => p.type === type)?.value;
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+function addDaysToDateString(dateString, days) {
+  const [y, m, d] = dateString.split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+async function generateUniqueDiscountCode(length = 5) {
+  for (let attempt = 0; attempt < 30; attempt++) {
+    let code = "";
+    for (let i = 0; i < length; i++) {
+      code += DISCOUNT_CODE_CHARS[crypto.randomInt(0, DISCOUNT_CODE_CHARS.length)];
+    }
+    if (!(await storage.discountCodeExists(code))) return code;
+  }
+  throw new Error("Could not generate unique discount code");
+}
+
+function formatDiscountCustomerMessage({ percent, validFrom, validUntil, code }) {
+  return `تمت الموافقة على خصم ${percent}% لطلبك.\nرمز التحقق: ${code}\nصالح من ${validFrom} حتى ${validUntil}.\nأبرز الرمز عند الكاشير للاستفادة من الخصم.`;
+}
+
+function looksLikeDiscountApproval(text) {
+  const raw = String(text || "");
+  return /(موافق|موافقة|اعطيه|أعطيه|نعطيه|خصم|وافق|اعتمد|اعتمده)/i.test(raw)
+    && extractDiscountPercent(raw) !== null;
+}
+
+async function executeApprovedDiscount(from, text) {
+  const caseItem = await resolveCaseReference(text);
+  if (!caseItem || caseItem.type !== "DISCOUNT") return false;
+  if (!looksLikeDiscountApproval(text)) return false;
+
+  const percent = extractDiscountPercent(text);
+  const durationDays = extractDurationDays(text);
+  if (!percent) return false;
+
+  if (!durationDays) {
+    await sendWhatsAppMessage(from, `⚠️ ${caseItem.id}: فهمت قيمة الخصم ${percent}%، لكن مدة الصلاحية غير محددة بوضوح. اكتب المدة فقط مثل: «أسبوعين من اليوم».`);
+    return true;
+  }
+
+  const existing = await storage.getDiscountCodeByCase(caseItem.id);
+  if (existing) {
+    await sendWhatsAppMessage(from, `ℹ️ ${caseItem.id}: يوجد رمز خصم مسجل مسبقاً لهذه الحالة: ${existing.code}`);
+    return true;
+  }
+
+  const validFrom = warsawDateParts();
+  const validUntil = addDaysToDateString(validFrom, durationDays - 1);
+  const code = await generateUniqueDiscountCode(5);
+
+  await storage.createDiscountCode({
+    code,
+    caseId: caseItem.id,
+    customerPhone: caseItem.customerNumber,
+    customerId: caseItem.customerId,
+    discountPercent: percent,
+    validFrom,
+    validUntil,
+    createdBy: from
+  });
+
+  const customerMessage = formatDiscountCustomerMessage({ percent, validFrom, validUntil, code });
+  const sent = await sendWhatsAppMessage(caseItem.customerNumber, customerMessage);
+
+  if (!sent) {
+    await sendWhatsAppMessage(from, `⚠️ ${caseItem.id}: تم إنشاء وحفظ رمز الخصم ${code}، لكن فشل إرسال الرسالة للعميل. الحالة بقيت مفتوحة.`);
+    return true;
+  }
+
+  await storage.addMessage({
+    phone: caseItem.customerNumber,
+    senderRole: "CUSTOMER",
+    role: "assistant",
+    content: customerMessage
+  });
+
+  await storage.closeCase(caseItem.id, {
+    closedBy: from,
+    managementDecision: `Approved ${percent}% discount for ${durationDays} days; verification code ${code}`
+  });
+
+  await sendWhatsAppMessage(
+    from,
+    `✅ ${caseItem.id}: تمت الموافقة والتنفيذ مباشرة.\nالخصم: ${percent}%\nالصلاحية: ${validFrom} إلى ${validUntil}\nرمز التحقق: ${code}\nتم إرسال الرمز للعميل وإغلاق الحالة.`
+  );
+  return true;
+}
+
 function formatManagementAlert(caseItem) {
   const labels = {
     CATERING: "🍽️ طلب كاترينغ يحتاج إدارة",
@@ -87,11 +242,15 @@ function formatManagementAlert(caseItem) {
     `الملخص: ${caseItem.summary}`,
     `المطلوب منك: ${caseItem.action}`,
     "",
-    `للرد: اكتب ${caseItem.id} ثم أمر واضح مثل: «ابعث للزبون: ...»`
+    caseItem.type === "DISCOUNT"
+      ? `للموافقة والتنفيذ مباشرة: اكتب ${caseItem.id} ثم مثلاً: «موافق على خصم 10% لمدة أسبوعين من اليوم». سيُنشأ رمز التحقق ويُرسل للعميل تلقائياً.`
+      : `للرد: اكتب ${caseItem.id} ثم أمر واضح مثل: «ابعث للزبون: ...»`
   ].filter(Boolean).join("\n");
 }
 
 async function executeOwnerCommand(from, text) {
+  if (await executeApprovedDiscount(from, text)) return true;
+
   const parsed = parseManagementSendCommand(text);
   if (!parsed) return false;
 
