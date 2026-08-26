@@ -5,6 +5,7 @@ const bodyParser = require("body-parser");
 const meta = require("./handlers/meta");
 const whatsapp = require("./handlers/whatsapp");
 const { generateReply } = require("./services/aiReply");
+const storage = require("./services/storage");
 
 const app = express();
 app.use(bodyParser.json({ limit: "100kb" }));
@@ -13,13 +14,22 @@ app.get("/", (req, res) => {
   res.send("✅ Social Media Agent شغال تمام");
 });
 
-app.get("/health", (req, res) => {
+app.get("/health", async (req, res) => {
+  let databaseConnected = false;
+  try {
+    databaseConnected = await storage.healthCheck();
+  } catch (err) {
+    console.error("Database health check failed:", err.message);
+  }
+
   res.json({
-    status: "ok",
+    status: databaseConnected ? "ok" : "degraded",
     openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
     model: process.env.OPENAI_MODEL || "not-set",
     metaConfigured: Boolean(process.env.META_ACCESS_TOKEN),
-    whatsappConfigured: Boolean(process.env.WHATSAPP_ACCESS_TOKEN)
+    whatsappConfigured: Boolean(process.env.WHATSAPP_ACCESS_TOKEN),
+    databaseConfigured: Boolean(process.env.DATABASE_URL),
+    databaseConnected
   });
 });
 
@@ -73,4 +83,15 @@ app.get("/webhook/whatsapp", whatsapp.verifyWebhook);
 app.post("/webhook/whatsapp", whatsapp.handleEvent);
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 السيرفر شغال على المنفذ ${PORT}`));
+
+async function start() {
+  try {
+    await storage.initStorage();
+    app.listen(PORT, () => console.log(`🚀 السيرفر شغال على المنفذ ${PORT}`));
+  } catch (err) {
+    console.error("❌ Failed to initialize persistent memory:", err);
+    process.exit(1);
+  }
+}
+
+start();
