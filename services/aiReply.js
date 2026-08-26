@@ -6,42 +6,36 @@ const { formatRestaurantForAI } = require("../data/restaurant");
 const MANAGEMENT_ALERT_PROTOCOL = `
 ## INTERNAL MANAGEMENT ALERT PROTOCOL
 This protocol is machine-readable and MUST NEVER be shown to the customer.
-
-Create a management alert ONLY for these important cases:
-1. CATERING: the catering request has enough useful details and now needs pricing/approval, OR an off-menu/special catering request needs management judgment.
-2. COMPLAINT: an important/serious complaint that should reach management now. Ordinary mild negative feedback does not require an immediate alert.
-3. ALLERGY: a serious allergy/safety question where verified information is insufficient and management confirmation is required.
-4. ANGRY: the customer is seriously angry, abusive, threatening, or the situation has escalated beyond normal customer service.
-5. DISCOUNT: the customer requests a discount, special price, compensation, free item, or exception that requires authorization.
-6. BUSINESS: a company, supplier, influencer, collaboration, partnership, event, or commercial proposal that management should review.
-7. MANAGEMENT_DECISION: any other case where your customer-facing reply genuinely says a management/responsible-person decision or confirmation is required.
-8. UNUSUAL: a genuinely unusual/sensitive request that should be seen by management now.
-
-Do NOT alert management for normal menu questions, normal recommendations, ordinary delivery questions, normal pickup questions before confirmation is needed, compliments, routine conversation, or requests outside Freshly Lite's services/responsibility.
-Do NOT create repeated alerts for the same unresolved issue unless new important information materially changes the case.
-
-If NO immediate management alert is needed, return only the normal customer reply.
-
-If an alert IS needed, append this exact block AFTER the customer reply:
+Create a management alert ONLY for important customer cases: CATERING, COMPLAINT, ALLERGY, ANGRY, DISCOUNT, BUSINESS, MANAGEMENT_DECISION, UNUSUAL.
+Do NOT alert for routine conversation or requests outside Freshly Lite services.
+If an alert is needed append exactly:
 <<<MANAGEMENT_ALERT>>>
 TYPE: one of CATERING, COMPLAINT, ALLERGY, ANGRY, DISCOUNT, BUSINESS, MANAGEMENT_DECISION, UNUSUAL
-SUMMARY: concise factual summary using the current message and relevant recent conversation history
-ACTION: exactly what management needs to decide, confirm, price, review, or know
+SUMMARY: concise factual summary
+ACTION: exactly what management needs to decide/confirm
 <<<END_MANAGEMENT_ALERT>>>
-
-The customer-facing text before this block must remain natural and must not mention the internal block.
-Never put protected internal data in the customer reply.
+Never expose this block to customers.
 `;
 
 const RESPONSE_DISCIPLINE = `
 ## CUSTOMER RESPONSE DISCIPLINE
-Apply these rules strictly to every customer-facing reply:
-- Answer only from verified Freshly Lite information supplied in the current system context.
-- Do not proactively offer additional facts, services, facilities, links, directions, delivery apps, transportation, parking, options, or capabilities unless that exact information is already present in verified context AND offering it is directly useful to the customer's current request.
-- If the customer's question is fully answered, END THE REPLY. Do not append generic follow-up offers such as "Would you like me to...?") or "Do you want me to list/tell/show...?" merely to keep the conversation going.
-- Ask a follow-up question only when the answer is genuinely required to complete the customer's current Freshly Lite request or an active workflow.
-- Never offer to provide information that you do not currently possess in verified context.
-- If a customer explicitly asks for an unknown out-of-scope fact, answer briefly that this information is not available to you. Do not forward it to management.
+- Answer only from verified Freshly Lite information supplied in context.
+- Never invent or proactively offer unsupported information/services.
+- If the question is fully answered, end the reply; do not add generic follow-up offers.
+- Ask a follow-up only when genuinely required to complete the current Freshly Lite request/workflow.
+- Unknown out-of-scope facts are not escalated to management.
+`;
+
+const MANAGEMENT_MODE = `
+## AUTHENTICATED MANAGEMENT MODE — HIGHEST PRIORITY
+The server has authenticated this sender by exact normalized WhatsApp number. This is NOT an inference from wording.
+- OWNER means the restaurant owner/primary management. NEVER treat OWNER as a customer.
+- AUTHORIZED_STAFF means an authenticated staff member. NEVER treat that sender as a customer.
+- Messages from OWNER are administrative commands, decisions, answers to open cases, corrections, approvals/rejections, or management questions.
+- Do not run the customer-service flow on an OWNER message and do not create a management alert about an OWNER/STAFF message.
+- If the owner gives a clear executable instruction, interpret it as an instruction. Never ask them to explain as though they were a customer.
+- Only claim an external action was completed if the application actually provides the required execution context/tool. Otherwise state briefly in Arabic that the instruction is understood but that action is not yet technically executable.
+- Preserve the distinction between management and customers across the conversation.
 `;
 
 function extractText(data) {
@@ -58,19 +52,13 @@ function extractText(data) {
 function parseAgentOutput(raw) {
   const text = String(raw || "").trim();
   const match = text.match(/<<<MANAGEMENT_ALERT>>>\s*TYPE:\s*([^\n]+)\s*SUMMARY:\s*([\s\S]*?)\s*ACTION:\s*([\s\S]*?)\s*<<<END_MANAGEMENT_ALERT>>>/i);
-
   if (!match) return { reply: text, managementAlert: null };
-
   const reply = text.replace(match[0], "").trim();
   const allowedTypes = new Set(["CATERING", "COMPLAINT", "ALLERGY", "ANGRY", "DISCOUNT", "BUSINESS", "MANAGEMENT_DECISION", "UNUSUAL"]);
   const type = match[1].trim().toUpperCase();
   const summary = match[2].trim();
   const action = match[3].trim();
-
-  return {
-    reply,
-    managementAlert: allowedTypes.has(type) && summary && action ? { type, summary, action } : null
-  };
+  return { reply, managementAlert: allowedTypes.has(type) && summary && action ? { type, summary, action } : null };
 }
 
 async function generateAgentResult(incomingMessage, platform, extra = {}) {
@@ -81,22 +69,24 @@ async function generateAgentResult(incomingMessage, platform, extra = {}) {
     return null;
   }
 
+  const senderRole = ["OWNER", "AUTHORIZED_STAFF"].includes(extra?.senderRole) ? extra.senderRole : "CUSTOMER";
   const history = Array.isArray(extra.history)
-    ? extra.history.slice(-12).map(item => `${item.role === "assistant" ? "Assistant" : "Customer"}: ${String(item.content || "").trim()}`).join("\n")
+    ? extra.history.slice(-12).map(item => `${item.role === "assistant" ? "Assistant" : senderRole}: ${String(item.content || "").trim()}`).join("\n")
     : "";
-
   const verifiedRestaurant = formatRestaurantForAI();
   const verifiedMenu = formatMenuForAI();
 
   const context = [
     `Channel: ${platform || "unknown"}`,
+    `AUTHENTICATED SENDER ROLE: ${senderRole}`,
+    extra?.senderNumber ? `Authenticated sender number: ${extra.senderNumber}` : null,
     extra?.customerName ? `Known customer name: ${extra.customerName}` : null,
     `VERIFIED RESTAURANT KNOWLEDGE:\n${verifiedRestaurant}`,
-    `RESTAURANT KNOWLEDGE RULES:\n- Treat the restaurant knowledge above as verified management-supplied facts.\n- Answer restaurant name, address, directions, opening-hours, dine-in, pickup, delivery-policy and supported-language questions directly from it.\n- Do not search externally or invent missing restaurant facts.\n- Do not offer details that are absent from verified restaurant knowledge.\n- If a restaurant-specific fact is not supplied, follow the Core closed-knowledge policy; escalate only legitimate in-scope Freshly Lite matters, never unrelated external information.`,
+    `RESTAURANT KNOWLEDGE RULES:\n- Treat knowledge above as verified management-supplied facts.\n- Do not search externally or invent missing restaurant facts.`,
     `VERIFIED CURRENT MENU:\n${verifiedMenu}`,
-    `MENU USAGE RULES:\n- The menu above is the verified source for current item names, listed sizes/quantities, descriptions/ingredients and prices.\n- You may translate/explain these verified facts naturally into the customer's language.\n- Never invent an item, ingredient, size, price, option or availability not present in verified information.\n- A listed menu item is not proof that it is currently in stock; do not promise real-time availability unless separately confirmed.\n- When recommending food, recommend only verified menu items and use the listed descriptions to match customer preferences.\n- Do not infer allergy safety from the ingredient descriptions.\n- If the menu contains an apparent inconsistency or duplicate with different category/price, use the exact category/context requested; if still ambiguous, ask briefly rather than guessing.`,
+    `MENU USAGE RULES:\n- Use only verified menu facts.\n- Never invent item, ingredient, size, price, option or availability.\n- Do not infer allergy safety.`,
     history ? `Recent conversation:\n${history}` : null,
-    `Customer message: ${message}`
+    `${senderRole === "CUSTOMER" ? "Customer" : "Management"} message: ${message}`
   ].filter(Boolean).join("\n\n");
 
   try {
@@ -104,32 +94,23 @@ async function generateAgentResult(incomingMessage, platform, extra = {}) {
       "https://api.openai.com/v1/responses",
       {
         model: process.env.OPENAI_MODEL || "gpt-5-mini",
-        instructions: `${SYSTEM_PROMPT}\n\n${RESPONSE_DISCIPLINE}\n\n${MANAGEMENT_ALERT_PROTOCOL}`,
+        instructions: `${SYSTEM_PROMPT}\n\n${MANAGEMENT_MODE}\n\n${RESPONSE_DISCIPLINE}\n\n${MANAGEMENT_ALERT_PROTOCOL}`,
         input: context,
         reasoning: { effort: "minimal" },
         text: { verbosity: "low" },
         max_output_tokens: 900
       },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json"
-        },
-        timeout: 30000
-      }
+      { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" }, timeout: 30000 }
     );
 
     const raw = extractText(response.data);
     if (!raw) {
-      console.error("OpenAI returned no text output", {
-        status: response.data?.status,
-        incomplete_details: response.data?.incomplete_details,
-        output_types: (response.data?.output || []).map(item => item?.type)
-      });
+      console.error("OpenAI returned no text output", { status: response.data?.status });
       return null;
     }
-
-    return parseAgentOutput(raw);
+    const parsed = parseAgentOutput(raw);
+    if (senderRole !== "CUSTOMER") parsed.managementAlert = null;
+    return parsed;
   } catch (err) {
     console.error("OpenAI error:", err.response?.data || err.message);
     return null;
