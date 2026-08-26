@@ -1,6 +1,7 @@
 const axios = require("axios");
 const { SYSTEM_PROMPT } = require("../prompts/restaurantAssistant");
 const { formatMenuForAI } = require("../data/menu");
+const { formatRestaurantForAI } = require("../data/restaurant");
 
 const MANAGEMENT_ALERT_PROTOCOL = `
 ## INTERNAL MANAGEMENT ALERT PROTOCOL
@@ -47,31 +48,17 @@ function parseAgentOutput(raw) {
   const text = String(raw || "").trim();
   const match = text.match(/<<<MANAGEMENT_ALERT>>>\s*TYPE:\s*([^\n]+)\s*SUMMARY:\s*([\s\S]*?)\s*ACTION:\s*([\s\S]*?)\s*<<<END_MANAGEMENT_ALERT>>>/i);
 
-  if (!match) {
-    return { reply: text, managementAlert: null };
-  }
+  if (!match) return { reply: text, managementAlert: null };
 
   const reply = text.replace(match[0], "").trim();
-  const allowedTypes = new Set([
-    "CATERING",
-    "COMPLAINT",
-    "ALLERGY",
-    "ANGRY",
-    "DISCOUNT",
-    "BUSINESS",
-    "MANAGEMENT_DECISION",
-    "UNUSUAL"
-  ]);
-
+  const allowedTypes = new Set(["CATERING", "COMPLAINT", "ALLERGY", "ANGRY", "DISCOUNT", "BUSINESS", "MANAGEMENT_DECISION", "UNUSUAL"]);
   const type = match[1].trim().toUpperCase();
   const summary = match[2].trim();
   const action = match[3].trim();
 
   return {
     reply,
-    managementAlert: allowedTypes.has(type) && summary && action
-      ? { type, summary, action }
-      : null
+    managementAlert: allowedTypes.has(type) && summary && action ? { type, summary, action } : null
   };
 }
 
@@ -87,13 +74,16 @@ async function generateAgentResult(incomingMessage, platform, extra = {}) {
     ? extra.history.slice(-12).map(item => `${item.role === "assistant" ? "Assistant" : "Customer"}: ${String(item.content || "").trim()}`).join("\n")
     : "";
 
+  const verifiedRestaurant = formatRestaurantForAI();
   const verifiedMenu = formatMenuForAI();
 
   const context = [
     `Channel: ${platform || "unknown"}`,
     extra?.customerName ? `Known customer name: ${extra.customerName}` : null,
+    `VERIFIED RESTAURANT KNOWLEDGE:\n${verifiedRestaurant}`,
+    `RESTAURANT KNOWLEDGE RULES:\n- Treat the restaurant knowledge above as verified management-supplied facts.\n- Answer restaurant name, address, directions, opening-hours, dine-in, pickup, delivery-policy and supported-language questions directly from it.\n- Do not search externally or invent missing restaurant facts.\n- If a restaurant-specific fact is not supplied, follow the Core closed-knowledge policy and escalate when appropriate.`,
     `VERIFIED CURRENT MENU:\n${verifiedMenu}`,
-    `MENU USAGE RULES:\n- The menu above is the verified source for current item names, listed sizes/quantities, descriptions/ingredients and prices.\n- You may translate/explain these verified facts naturally into the customer's language.\n- Never invent an item, ingredient, size, price, option or availability not present in verified information.\n- A listed menu item is not proof that it is currently in stock; do not promise real-time availability unless separately confirmed.\n- When recommending food, recommend only verified menu items and use the listed descriptions to match customer preferences.\n- Do not infer allergy safety from the ingredient descriptions. Follow the system allergen rules.\n- If the menu contains an apparent inconsistency or duplicate with different category/price, use the exact category/context requested; if still ambiguous, ask a short clarifying question rather than guessing.`,
+    `MENU USAGE RULES:\n- The menu above is the verified source for current item names, listed sizes/quantities, descriptions/ingredients and prices.\n- You may translate/explain these verified facts naturally into the customer's language.\n- Never invent an item, ingredient, size, price, option or availability not present in verified information.\n- A listed menu item is not proof that it is currently in stock; do not promise real-time availability unless separately confirmed.\n- When recommending food, recommend only verified menu items and use the listed descriptions to match customer preferences.\n- Do not infer allergy safety from the ingredient descriptions.\n- If the menu contains an apparent inconsistency or duplicate with different category/price, use the exact category/context requested; if still ambiguous, ask briefly rather than guessing.`,
     history ? `Recent conversation:\n${history}` : null,
     `Customer message: ${message}`
   ].filter(Boolean).join("\n\n");
