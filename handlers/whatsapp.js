@@ -1,12 +1,27 @@
 const axios = require("axios");
 const { generateAgentResult } = require("../services/aiReply");
 
-// Short in-memory WhatsApp context. This survives normal messages on the same
-// running instance, but is intentionally not treated as permanent customer memory.
 const conversations = new Map();
 const recentAlerts = new Map();
 const MAX_HISTORY_MESSAGES = 12;
 const ALERT_DEDUPE_MS = 30 * 60 * 1000;
+
+function normalizePhone(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
+function getSenderRole(from) {
+  const sender = normalizePhone(from);
+  const management = normalizePhone(process.env.MANAGEMENT_WHATSAPP_NUMBER);
+  const staff = String(process.env.AUTHORIZED_STAFF_WHATSAPP_NUMBERS || "")
+    .split(",")
+    .map(normalizePhone)
+    .filter(Boolean);
+
+  if (management && sender === management) return "OWNER";
+  if (staff.includes(sender)) return "AUTHORIZED_STAFF";
+  return "CUSTOMER";
+}
 
 function verifyWebhook(req, res) {
   const mode = req.query["hub.mode"];
@@ -20,12 +35,12 @@ function verifyWebhook(req, res) {
   return res.sendStatus(403);
 }
 
-function getHistory(customerNumber) {
-  return conversations.get(customerNumber) || [];
+function getHistory(key) {
+  return conversations.get(key) || [];
 }
 
-function saveHistory(customerNumber, history) {
-  conversations.set(customerNumber, history.slice(-MAX_HISTORY_MESSAGES));
+function saveHistory(key, history) {
+  conversations.set(key, history.slice(-MAX_HISTORY_MESSAGES));
 }
 
 function shouldSendAlert(customerNumber, alert) {
@@ -33,11 +48,7 @@ function shouldSendAlert(customerNumber, alert) {
   const previous = recentAlerts.get(key);
   const fingerprint = `${alert.summary}|${alert.action}`.toLowerCase().replace(/\s+/g, " ").trim();
   const now = Date.now();
-
-  if (previous && previous.fingerprint === fingerprint && now - previous.sentAt < ALERT_DEDUPE_MS) {
-    return false;
-  }
-
+  if (previous && previous.fingerprint === fingerprint && now - previous.sentAt < ALERT_DEDUPE_MS) return false;
   recentAlerts.set(key, { fingerprint, sentAt: now });
   return true;
 }
@@ -69,44 +80,44 @@ async function handleEvent(req, res) {
   const entry = req.body.entry?.[0];
   const change = entry?.changes?.[0];
   const messages = change?.value?.messages;
-
   if (!messages) return;
 
   for (const msg of messages) {
-    const from = msg.from;
+    const from = normalizePhone(msg.from);
     const text = msg.text?.body?.trim();
     if (!from || !text) continue;
 
-    // Keep the working test route for diagnostics.
+    const senderRole = getSenderRole(from);
+    console.log(`WhatsApp sender role: ${senderRole} (${from})`);
+
     if (text.toUpperCase() === "TEST_ALERT") {
       const sent = await sendManagementAlert(
         `🔔 اختبار تنبيه الإدارة من Freshly Lite\n\nرقم المُرسل: ${from}\nالحالة: نظام تنبيهات الإدارة يعمل.`
       );
-
-      if (sent) {
-        await sendWhatsAppMessage(from, "✅ تم إرسال تنبيه الاختبار للإدارة بنجاح.");
-      } else {
-        await sendWhatsAppMessage(from, "⚠️ لم ينجح إرسال تنبيه الاختبار للإدارة. سيتم فحص الإعدادات.");
-      }
+      await sendWhatsAppMessage(from, sent ? "✅ تم إرسال تنبيه الاختبار للإدارة بنجاح." : "⚠️ لم ينجح إرسال تنبيه الاختبار للإدارة. سيتم فحص الإعدادات.");
       continue;
     }
 
-    const history = getHistory(from);
-    const result = await generateAgentResult(text, "whatsapp", { history });
+    const historyKey = `${senderRole}:${from}`;
+    const history = getHistory(historyKey);
+    const result = await generateAgentResult(text, "whatsapp", {
+      history,
+      senderRole,
+      senderNumber: from
+    });
     if (!result) continue;
 
-    if (result.reply) {
-      await sendWhatsAppMessage(from, result.reply);
-    }
+    if (result.reply) await sendWhatsAppMessage(from, result.reply);
 
     const updatedHistory = [
       ...history,
       { role: "user", content: text },
       ...(result.reply ? [{ role: "assistant", content: result.reply }] : [])
     ];
-    saveHistory(from, updatedHistory);
+    saveHistory(historyKey, updatedHistory);
 
-    if (result.managementAlert && shouldSendAlert(from, result.managementAlert)) {
+    // Management/staff messages must never generate alerts back to management.
+    if (senderRole === "CUSTOMER" && result.managementAlert && shouldSendAlert(from, result.managementAlert)) {
       const alertText = formatManagementAlert(from, result.managementAlert);
       const sent = await sendManagementAlert(alertText);
       if (!sent) {
@@ -120,39 +131,28 @@ async function handleEvent(req, res) {
 }
 
 async function sendManagementAlert(text) {
-  const managementNumber = String(process.env.MANAGEMENT_WHATSAPP_NUMBER || "").replace(/\D/g, "");
+  const managementNumber = normalizePhone(process.env.MANAGEMENT_WHATSAPP_NUMBER);
   if (!managementNumber) {
     console.error("MANAGEMENT_WHATSAPP_NUMBER is missing");
     return false;
   }
-
   return sendWhatsAppMessage(managementNumber, text);
 }
 
 async function sendWhatsAppMessage(to, text) {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
-
   if (!phoneNumberId || !accessToken) {
     console.error("WhatsApp sending configuration is missing");
     return false;
   }
 
   const url = `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`;
-
   try {
     await axios.post(
       url,
-      {
-        messaging_product: "whatsapp",
-        to,
-        text: { body: text }
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`
-        }
-      }
+      { messaging_product: "whatsapp", to, text: { body: text } },
+      { headers: { Authorization: `Bearer ${accessToken}` } }
     );
     return true;
   } catch (err) {
