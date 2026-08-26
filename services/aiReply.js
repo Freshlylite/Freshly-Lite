@@ -8,6 +8,14 @@ const MANAGEMENT_ALERT_PROTOCOL = `
 This protocol is machine-readable and MUST NEVER be shown to the customer.
 Create a management alert ONLY for important customer cases: CATERING, COMPLAINT, ALLERGY, ANGRY, DISCOUNT, BUSINESS, MANAGEMENT_DECISION, UNUSUAL.
 Do NOT alert for routine conversation or requests outside Freshly Lite services.
+
+ALLERGY is mandatory when ALL of these are true:
+- the customer indicates an allergy/sensitivity or asks about an allergen for safety reasons;
+- the relevant item/product scope is known well enough to identify what management must check;
+- verified restaurant data is insufficient to safely answer.
+In that situation, do NOT merely tell the customer you will contact management. You MUST append the machine-readable ALLERGY block in the SAME response so the server can actually send the management alert.
+Do not ask the customer to choose between "ingredient" and "cross-contamination". If safety confirmation is missing, management should be asked to confirm both the declared ingredient presence and any known cross-contact risk relevant to the stated allergen.
+
 If an alert is needed append exactly:
 <<<MANAGEMENT_ALERT>>>
 TYPE: one of CATERING, COMPLAINT, ALLERGY, ANGRY, DISCOUNT, BUSINESS, MANAGEMENT_DECISION, UNUSUAL
@@ -52,7 +60,8 @@ ALLERGY / SAFETY CONTINUITY:
 - If you ask which menu item they mean and the customer answers, combine that answer with the already-known allergen question.
 - Never ask again what allergy they have if it was already stated in recent conversation history.
 - Never pivot from an unresolved allergy question to asking about drinks, extras, ordering, or whether they want the item.
-- If verified information is insufficient to confirm allergy safety, say briefly in the customer's language that you need restaurant confirmation, generate the ALLERGY management alert, and do not guess.
+- Never ask the customer whether they mean direct ingredient presence OR cross-contamination. For an allergy, both are relevant safety checks unless verified data already resolves them.
+- If verified information is insufficient to confirm allergy safety and the product scope is known, immediately tell the customer briefly that restaurant confirmation is needed and generate the ALLERGY management alert in the same response. Do not ask further safety-choice questions and do not guess.
 `;
 
 const MANAGEMENT_MODE = `
@@ -88,6 +97,30 @@ function parseAgentOutput(raw) {
   const summary = match[2].trim();
   const action = match[3].trim();
   return { reply, managementAlert: allowedTypes.has(type) && summary && action ? { type, summary, action } : null };
+}
+
+function hasAllergySignal(text) {
+  return /(حساس|حساسية|سمسم|مكسرات|غلوتين|جلوتين|صويا|ألبان|allerg|sesame|gluten|soy|dairy|orzech|sezam|alerg|аллерг|кунжут)/i.test(String(text || ""));
+}
+
+function needsManagementConfirmation(text) {
+  return /(تأكيد|الإدارة|المطبخ|غير متوفر|غير متوفرة|سأرسل|سارسل|سأطلب|ساطلب|confirm|management|kitchen|need to check|muszę.*sprawdzić|potwierdzić|уточн|подтверд)/i.test(String(text || ""));
+}
+
+function buildAllergyFallback(historyText, newestMessage, reply) {
+  const combined = `${historyText}\n${newestMessage}`;
+  if (!hasAllergySignal(combined) || !needsManagementConfirmation(reply)) return null;
+
+  const sesame = /(سمسم|sesame|sezam|кунжут)/i.test(combined);
+  const falafel = /(فلافل|falafel)/i.test(combined);
+  const allergen = sesame ? "السمسم ومشتقاته" : "مسبب الحساسية المذكور من العميل";
+  const item = falafel ? "الفلافل المذكور في المحادثة" : "المنتج المذكور في المحادثة";
+
+  return {
+    type: "ALLERGY",
+    summary: `العميل لديه سؤال حساسية بخصوص ${allergen} في ${item}، والمعلومات الموثقة الحالية لا تكفي لتأكيد السلامة.`,
+    action: `يرجى تأكيد هل ${item} يحتوي على ${allergen} ضمن المكونات، وهل يوجد خطر تلوث/تماس متقاطع معروف مع ${allergen}.`
+  };
 }
 
 async function generateAgentResult(incomingMessage, platform, extra = {}) {
@@ -138,7 +171,17 @@ async function generateAgentResult(incomingMessage, platform, extra = {}) {
       console.error("OpenAI returned no text output", { status: response.data?.status });
       return null;
     }
+
     const parsed = parseAgentOutput(raw);
+
+    if (senderRole === "CUSTOMER" && !parsed.managementAlert) {
+      const fallbackAlert = buildAllergyFallback(history, message, parsed.reply);
+      if (fallbackAlert) {
+        parsed.managementAlert = fallbackAlert;
+        console.log("Generated deterministic ALLERGY management alert fallback");
+      }
+    }
+
     if (senderRole !== "CUSTOMER") parsed.managementAlert = null;
     return parsed;
   } catch (err) {
