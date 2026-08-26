@@ -17,7 +17,7 @@ Create a management alert ONLY for these important cases:
 7. MANAGEMENT_DECISION: any other case where your customer-facing reply genuinely says a management/responsible-person decision or confirmation is required.
 8. UNUSUAL: a genuinely unusual/sensitive request that should be seen by management now.
 
-Do NOT alert management for normal menu questions, normal recommendations, ordinary delivery questions, normal pickup questions before confirmation is needed, compliments, or routine conversation.
+Do NOT alert management for normal menu questions, normal recommendations, ordinary delivery questions, normal pickup questions before confirmation is needed, compliments, routine conversation, or requests outside Freshly Lite's services/responsibility.
 Do NOT create repeated alerts for the same unresolved issue unless new important information materially changes the case.
 
 If NO immediate management alert is needed, return only the normal customer reply.
@@ -31,6 +31,17 @@ ACTION: exactly what management needs to decide, confirm, price, review, or know
 
 The customer-facing text before this block must remain natural and must not mention the internal block.
 Never put protected internal data in the customer reply.
+`;
+
+const RESPONSE_DISCIPLINE = `
+## CUSTOMER RESPONSE DISCIPLINE
+Apply these rules strictly to every customer-facing reply:
+- Answer only from verified Freshly Lite information supplied in the current system context.
+- Do not proactively offer additional facts, services, facilities, links, directions, delivery apps, transportation, parking, options, or capabilities unless that exact information is already present in verified context AND offering it is directly useful to the customer's current request.
+- If the customer's question is fully answered, END THE REPLY. Do not append generic follow-up offers such as "Would you like me to...?") or "Do you want me to list/tell/show...?" merely to keep the conversation going.
+- Ask a follow-up question only when the answer is genuinely required to complete the customer's current Freshly Lite request or an active workflow.
+- Never offer to provide information that you do not currently possess in verified context.
+- If a customer explicitly asks for an unknown out-of-scope fact, answer briefly that this information is not available to you. Do not forward it to management.
 `;
 
 function extractText(data) {
@@ -81,7 +92,7 @@ async function generateAgentResult(incomingMessage, platform, extra = {}) {
     `Channel: ${platform || "unknown"}`,
     extra?.customerName ? `Known customer name: ${extra.customerName}` : null,
     `VERIFIED RESTAURANT KNOWLEDGE:\n${verifiedRestaurant}`,
-    `RESTAURANT KNOWLEDGE RULES:\n- Treat the restaurant knowledge above as verified management-supplied facts.\n- Answer restaurant name, address, directions, opening-hours, dine-in, pickup, delivery-policy and supported-language questions directly from it.\n- Do not search externally or invent missing restaurant facts.\n- If a restaurant-specific fact is not supplied, follow the Core closed-knowledge policy and escalate when appropriate.`,
+    `RESTAURANT KNOWLEDGE RULES:\n- Treat the restaurant knowledge above as verified management-supplied facts.\n- Answer restaurant name, address, directions, opening-hours, dine-in, pickup, delivery-policy and supported-language questions directly from it.\n- Do not search externally or invent missing restaurant facts.\n- Do not offer details that are absent from verified restaurant knowledge.\n- If a restaurant-specific fact is not supplied, follow the Core closed-knowledge policy; escalate only legitimate in-scope Freshly Lite matters, never unrelated external information.`,
     `VERIFIED CURRENT MENU:\n${verifiedMenu}`,
     `MENU USAGE RULES:\n- The menu above is the verified source for current item names, listed sizes/quantities, descriptions/ingredients and prices.\n- You may translate/explain these verified facts naturally into the customer's language.\n- Never invent an item, ingredient, size, price, option or availability not present in verified information.\n- A listed menu item is not proof that it is currently in stock; do not promise real-time availability unless separately confirmed.\n- When recommending food, recommend only verified menu items and use the listed descriptions to match customer preferences.\n- Do not infer allergy safety from the ingredient descriptions.\n- If the menu contains an apparent inconsistency or duplicate with different category/price, use the exact category/context requested; if still ambiguous, ask briefly rather than guessing.`,
     history ? `Recent conversation:\n${history}` : null,
@@ -93,7 +104,7 @@ async function generateAgentResult(incomingMessage, platform, extra = {}) {
       "https://api.openai.com/v1/responses",
       {
         model: process.env.OPENAI_MODEL || "gpt-5-mini",
-        instructions: `${SYSTEM_PROMPT}\n\n${MANAGEMENT_ALERT_PROTOCOL}`,
+        instructions: `${SYSTEM_PROMPT}\n\n${RESPONSE_DISCIPLINE}\n\n${MANAGEMENT_ALERT_PROTOCOL}`,
         input: context,
         reasoning: { effort: "minimal" },
         text: { verbosity: "low" },
