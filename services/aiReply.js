@@ -33,6 +33,11 @@ OFF-MENU / CUSTOM RESTAURANT REQUESTS:
 - Once the request is clear enough for management to decide, create a MANAGEMENT_DECISION alert in the SAME response.
 - If you tell the customer that you will notify/contact/send the request to management, the management alert block is mandatory in that same response. Never promise escalation without generating the block.
 
+PAYMENT / DEPOSIT:
+- Never invent bank-account details, IBANs, payment links, beneficiary details, transfer references, deposit instructions, payment deadlines, or payment methods.
+- Payment information may be sent only if it exists verbatim in VERIFIED RESTAURANT KNOWLEDGE or is supplied explicitly by authenticated management for that case.
+- If a customer needs payment/deposit details and verified data does not contain them, create a MANAGEMENT_DECISION alert. Do not fabricate placeholders or example account numbers.
+
 If an alert is needed append exactly:
 <<<MANAGEMENT_ALERT>>>
 TYPE: one of CATERING, COMPLAINT, ALLERGY, ANGRY, DISCOUNT, BUSINESS, MANAGEMENT_DECISION, UNUSUAL
@@ -47,6 +52,7 @@ const RESPONSE_DISCIPLINE = `
 - Answer only from verified Freshly Lite information supplied in context.
 - Never invent or proactively offer unsupported information/services.
 - Never invent catering prices, catering package quantities, catering presentation/service details, staffing, delivery/setup promises, or timing commitments that are not explicitly verified.
+- Never invent payment or banking data. If verified payment data is unavailable, ask management instead of giving any account number or transfer instruction.
 - If the active request is catering and management pricing/approval is required, collect only the missing essential information, then stop and escalate as CATERING rather than estimating.
 - If the customer asks for an off-menu/custom restaurant item, do not say the request was sent to management unless the machine-readable management alert is produced in the same response.
 - If the question is fully answered, end the reply; do not add generic follow-up offers.
@@ -152,6 +158,31 @@ function promisedManagementEscalation(reply) {
   return /(سأرسل.*الإدارة|سارسل.*الادارة|سأبلغ.*الإدارة|سابلغ.*الادارة|سأعود.*رد|سارجع.*رد|أرسل.*إلى\s+الإدارة|send.*management|contact.*management|przekaż.*kierown|уточн.*админ)/i.test(String(reply || ""));
 }
 
+function containsPaymentData(text) {
+  const value = String(text || "");
+  const ibanLike = /\b[A-Z]{2}\d{2}(?:\s*\d){10,30}\b/i.test(value);
+  const bankLabel = /(numer\s+konta|konto\s+do\s+wpłaty|rachunek|IBAN|bank\s+account|account\s+number|nr\s+konta|رقم\s+الحساب|حساب\s+بنكي|beneficiary|nazwa\s+odbiorcy|tytuł\s+przelewu|transfer\s+title|данные\s+для\s+оплаты)/i.test(value);
+  return ibanLike || bankLabel;
+}
+
+function verifiedPaymentDataExists(verifiedRestaurant) {
+  return /(numer\s+konta|IBAN|bank\s+account|account\s+number|رقم\s+الحساب|حساب\s+بنكي|nazwa\s+odbiorcy|tytuł\s+przelewu)/i.test(String(verifiedRestaurant || ""));
+}
+
+function safePaymentReplyForCustomer(message) {
+  const value = String(message || "");
+  if (/[ąćęłńóśźż]/i.test(value) || /tak|proszę|płatno|zaliczk/i.test(value)) {
+    return "Dziękuję. Dane do płatności wymagają potwierdzenia przez restaurację. Nie podam numeru konta ani danych do przelewu bez zweryfikowanych danych. Przekazuję prośbę do administracji.";
+  }
+  if (/[а-яё]/i.test(value)) {
+    return "Спасибо. Платёжные реквизиты должны быть подтверждены рестораном. Я не буду указывать номер счёта или реквизиты без проверенных данных. Передаю запрос администрации.";
+  }
+  if (/[A-Za-z]/.test(value) && !/[\u0600-\u06FF]/.test(value)) {
+    return "Thank you. Payment details must be confirmed by the restaurant. I will not provide a bank account or transfer details unless they are verified. I’m sending the request to management.";
+  }
+  return "شكرًا. بيانات الدفع لازم تكون مؤكدة من المطعم. ما رح أعطي رقم حساب أو بيانات تحويل بدون معلومات موثقة. سأرسل الطلب للإدارة للتأكيد.";
+}
+
 function buildAllergyFallback(historyItems, newestMessage, reply) {
   const customerHistory = customerMessagesFromHistory(historyItems);
   const customerText = [...customerHistory, String(newestMessage || "")].join("\n");
@@ -170,13 +201,13 @@ function buildAllergyFallback(historyItems, newestMessage, reply) {
 function buildManagementDecisionFallback(historyItems, newestMessage, reply) {
   const customerHistory = customerMessagesFromHistory(historyItems);
   const customerText = [...customerHistory, String(newestMessage || "")].join("\n");
-  if (!isRestaurantRequestSignal(customerText)) return null;
+  if (!isRestaurantRequestSignal(customerText) && !/(płatno|zaliczk|payment|deposit|دفع|عربون|دفعة|оплат)/i.test(customerText)) return null;
   if (!promisedManagementEscalation(reply) && !needsManagementConfirmation(reply)) return null;
   const recent = [...customerHistory, String(newestMessage || "")].filter(Boolean).slice(-4).join(" | ");
   return {
     type: "MANAGEMENT_DECISION",
-    summary: `العميل لديه طلب مطعم يحتاج قرار الإدارة. آخر تفاصيل العميل: ${recent}`,
-    action: "يرجى مراجعة الطلب وتأكيد هل يمكن تنفيذه، وأي شروط أو سعر أو بديل معتمد يجب إبلاغ العميل به."
+    summary: `العميل لديه طلب يحتاج قرار الإدارة. آخر تفاصيل العميل: ${recent}`,
+    action: "يرجى مراجعة الطلب وتأكيد القرار والمعلومات المعتمدة التي يجب إبلاغ العميل بها. إذا كان الموضوع دفعاً/عربوناً، أرسل بيانات الدفع الرسمية فقط إن كانت معتمدة."
   };
 }
 
@@ -235,28 +266,27 @@ async function generateAgentResult(incomingMessage, platform, extra = {}) {
     const parsed = parseAgentOutput(raw);
 
     if (parsed.managementAlert?.type === "ALLERGY" && !hasPositiveAllergySignal(customerOnlyContext)) {
-      console.warn("Blocked false ALLERGY alert: no positive customer allergy signal");
       parsed.managementAlert = null;
     }
 
-    if (likelyCatering && parsed.managementAlert?.type === "ALLERGY" && !hasPositiveAllergySignal(customerOnlyContext)) {
-      parsed.managementAlert = null;
+    if (senderRole === "CUSTOMER" && containsPaymentData(parsed.reply) && !verifiedPaymentDataExists(verifiedRestaurant)) {
+      console.warn("Blocked hallucinated payment/bank details from customer reply");
+      parsed.reply = safePaymentReplyForCustomer(message);
+      parsed.managementAlert = {
+        type: "MANAGEMENT_DECISION",
+        summary: `العميل يحتاج بيانات دفع/عربون، لكن لا توجد بيانات دفع موثقة في معلومات المطعم. طلب العميل: ${message}`,
+        action: "يرجى تزويد العميل ببيانات الدفع الرسمية المعتمدة أو تحديد طريقة الدفع الصحيحة. ممنوع استخدام أي رقم حساب غير موثق."
+      };
     }
 
     if (senderRole === "CUSTOMER" && !parsed.managementAlert) {
       const allergyFallback = buildAllergyFallback(historyItems, message, parsed.reply);
-      if (allergyFallback) {
-        parsed.managementAlert = allergyFallback;
-        console.log("Generated deterministic ALLERGY management alert fallback");
-      }
+      if (allergyFallback) parsed.managementAlert = allergyFallback;
     }
 
     if (senderRole === "CUSTOMER" && !parsed.managementAlert) {
       const decisionFallback = buildManagementDecisionFallback(historyItems, message, parsed.reply);
-      if (decisionFallback) {
-        parsed.managementAlert = decisionFallback;
-        console.log("Generated deterministic MANAGEMENT_DECISION alert fallback");
-      }
+      if (decisionFallback) parsed.managementAlert = decisionFallback;
     }
 
     if (senderRole !== "CUSTOMER") parsed.managementAlert = null;
