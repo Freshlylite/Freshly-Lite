@@ -27,6 +27,12 @@ CATERING:
 - Never substitute ALLERGY merely because the catering workflow contained a routine allergy question.
 - Catering pricing, custom quantities, event package composition, presentation/service commitments, and final catering offer terms must not be invented by the assistant when not explicitly verified.
 
+OFF-MENU / CUSTOM RESTAURANT REQUESTS:
+- If the customer requests a Freshly Lite food/product/order variation that is not present in verified menu data, do not claim it is accepted or available.
+- Collect only the minimum details needed to identify the request.
+- Once the request is clear enough for management to decide, create a MANAGEMENT_DECISION alert in the SAME response.
+- If you tell the customer that you will notify/contact/send the request to management, the management alert block is mandatory in that same response. Never promise escalation without generating the block.
+
 If an alert is needed append exactly:
 <<<MANAGEMENT_ALERT>>>
 TYPE: one of CATERING, COMPLAINT, ALLERGY, ANGRY, DISCOUNT, BUSINESS, MANAGEMENT_DECISION, UNUSUAL
@@ -42,6 +48,7 @@ const RESPONSE_DISCIPLINE = `
 - Never invent or proactively offer unsupported information/services.
 - Never invent catering prices, catering package quantities, catering presentation/service details, staffing, delivery/setup promises, or timing commitments that are not explicitly verified.
 - If the active request is catering and management pricing/approval is required, collect only the missing essential information, then stop and escalate as CATERING rather than estimating.
+- If the customer asks for an off-menu/custom restaurant item, do not say the request was sent to management unless the machine-readable management alert is produced in the same response.
 - If the question is fully answered, end the reply; do not add generic follow-up offers.
 - Ask a follow-up only when genuinely required to complete the current Freshly Lite request/workflow.
 - Unknown out-of-scope facts are not escalated to management.
@@ -118,10 +125,7 @@ function parseAgentOutput(raw) {
 }
 
 function customerMessagesFromHistory(historyItems = []) {
-  return historyItems
-    .filter(item => item?.role !== "assistant")
-    .map(item => String(item?.content || "").trim())
-    .filter(Boolean);
+  return historyItems.filter(item => item?.role !== "assistant").map(item => String(item?.content || "").trim()).filter(Boolean);
 }
 
 function hasPositiveAllergySignal(text) {
@@ -137,25 +141,42 @@ function isCateringSignal(text) {
 }
 
 function needsManagementConfirmation(text) {
-  return /(تأكيد|الإدارة|المطبخ|غير متوفر|غير متوفرة|سأرسل|سارسل|سأطلب|ساطلب|confirm|management|kitchen|need to check|muszę.*sprawdzić|potwierdzić|уточн|подтверд)/i.test(String(text || ""));
+  return /(تأكيد|الإدارة|المطبخ|غير متوفر|غير متوفرة|سأرسل|سارسل|سأطلب|ساطلب|سأبلغ|سابلغ|أبلغ\s+الإدارة|ابلغ\s+الادارة|confirm|management|kitchen|need to check|muszę.*sprawdzić|potwierdzić|уточн|подтверд)/i.test(String(text || ""));
+}
+
+function isRestaurantRequestSignal(text) {
+  return /(طلب|وجبة|طبق|أكل|اكل|داخل\s+المطعم|استلام|رز|بازيلا|فلافل|حمص|ساندويش|menu|order|meal|dish|restaurant|zam[oó]w|danie|restaurac|заказ|блюд)/i.test(String(text || ""));
+}
+
+function promisedManagementEscalation(reply) {
+  return /(سأرسل.*الإدارة|سارسل.*الادارة|سأبلغ.*الإدارة|سابلغ.*الادارة|سأعود.*رد|سارجع.*رد|أرسل.*إلى\s+الإدارة|send.*management|contact.*management|przekaż.*kierown|уточн.*админ)/i.test(String(reply || ""));
 }
 
 function buildAllergyFallback(historyItems, newestMessage, reply) {
   const customerHistory = customerMessagesFromHistory(historyItems);
   const customerText = [...customerHistory, String(newestMessage || "")].join("\n");
   if (!hasPositiveAllergySignal(customerText) || !needsManagementConfirmation(reply)) return null;
-
-  // If catering is the primary context and there is no positive allergy statement, never create ALLERGY.
-  // Positive allergy detection above is based only on customer-authored messages.
   const sesame = /(سمسم|sesame|sezam|кунжут)/i.test(customerText);
   const falafel = /(فلافل|falafel)/i.test(customerText);
   const allergen = sesame ? "السمسم ومشتقاته" : "مسبب الحساسية المذكور من العميل";
   const item = falafel ? "الفلافل المذكور في المحادثة" : "المنتج المذكور في المحادثة";
-
   return {
     type: "ALLERGY",
     summary: `العميل لديه سؤال حساسية بخصوص ${allergen} في ${item}، والمعلومات الموثقة الحالية لا تكفي لتأكيد السلامة.`,
     action: `يرجى تأكيد هل ${item} يحتوي على ${allergen} ضمن المكونات، وهل يوجد خطر تلوث/تماس متقاطع معروف مع ${allergen}.`
+  };
+}
+
+function buildManagementDecisionFallback(historyItems, newestMessage, reply) {
+  const customerHistory = customerMessagesFromHistory(historyItems);
+  const customerText = [...customerHistory, String(newestMessage || "")].join("\n");
+  if (!isRestaurantRequestSignal(customerText)) return null;
+  if (!promisedManagementEscalation(reply) && !needsManagementConfirmation(reply)) return null;
+  const recent = [...customerHistory, String(newestMessage || "")].filter(Boolean).slice(-4).join(" | ");
+  return {
+    type: "MANAGEMENT_DECISION",
+    summary: `العميل لديه طلب مطعم يحتاج قرار الإدارة. آخر تفاصيل العميل: ${recent}`,
+    action: "يرجى مراجعة الطلب وتأكيد هل يمكن تنفيذه، وأي شروط أو سعر أو بديل معتمد يجب إبلاغ العميل به."
   };
 }
 
@@ -169,9 +190,7 @@ async function generateAgentResult(incomingMessage, platform, extra = {}) {
 
   const senderRole = ["OWNER", "AUTHORIZED_STAFF"].includes(extra?.senderRole) ? extra.senderRole : "CUSTOMER";
   const historyItems = Array.isArray(extra.history) ? extra.history.slice(-12) : [];
-  const history = historyItems
-    .map(item => `${item.role === "assistant" ? "Assistant" : senderRole}: ${String(item.content || "").trim()}`)
-    .join("\n");
+  const history = historyItems.map(item => `${item.role === "assistant" ? "Assistant" : senderRole}: ${String(item.content || "").trim()}`).join("\n");
   const verifiedRestaurant = formatRestaurantForAI();
   const verifiedMenu = formatMenuForAI();
   const customerOnlyContext = [...customerMessagesFromHistory(historyItems), message].join("\n");
@@ -215,22 +234,28 @@ async function generateAgentResult(incomingMessage, platform, extra = {}) {
 
     const parsed = parseAgentOutput(raw);
 
-    // Safety guard: a negative/no-allergy customer context must never produce an ALLERGY case.
     if (parsed.managementAlert?.type === "ALLERGY" && !hasPositiveAllergySignal(customerOnlyContext)) {
       console.warn("Blocked false ALLERGY alert: no positive customer allergy signal");
       parsed.managementAlert = null;
     }
 
-    // Safety guard: catering is the primary workflow unless the customer positively reports an actual allergy issue.
     if (likelyCatering && parsed.managementAlert?.type === "ALLERGY" && !hasPositiveAllergySignal(customerOnlyContext)) {
       parsed.managementAlert = null;
     }
 
     if (senderRole === "CUSTOMER" && !parsed.managementAlert) {
-      const fallbackAlert = buildAllergyFallback(historyItems, message, parsed.reply);
-      if (fallbackAlert) {
-        parsed.managementAlert = fallbackAlert;
+      const allergyFallback = buildAllergyFallback(historyItems, message, parsed.reply);
+      if (allergyFallback) {
+        parsed.managementAlert = allergyFallback;
         console.log("Generated deterministic ALLERGY management alert fallback");
+      }
+    }
+
+    if (senderRole === "CUSTOMER" && !parsed.managementAlert) {
+      const decisionFallback = buildManagementDecisionFallback(historyItems, message, parsed.reply);
+      if (decisionFallback) {
+        parsed.managementAlert = decisionFallback;
+        console.log("Generated deterministic MANAGEMENT_DECISION alert fallback");
       }
     }
 
