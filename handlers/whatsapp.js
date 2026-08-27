@@ -35,6 +35,31 @@ function verifyWebhook(req, res) {
   return res.sendStatus(403);
 }
 
+function detectCustomerTopic(text) {
+  const raw = String(text || "").toLowerCase();
+  if (/(كاترينغ|كيترينغ|catering|حفلة|مناسبة|بوفيه|buffet|ضيوف|شركة|مكتب|event)/i.test(raw)) return "CATERING";
+  if (/(خصم|discount|kod rabat|rabat|كود خصم)/i.test(raw)) return "DISCOUNT";
+  if (/(حساس|حساسية|allerg|alerg|سمسم|sesame|sezam|gluten|غلوتين|جلوتين)/i.test(raw)) return "ALLERGY";
+  if (/(شكوى|complaint|problem|مشكلة|زعلان|غاضب)/i.test(raw)) return "COMPLAINT";
+  return "GENERAL";
+}
+
+function filterHistoryForCurrentTopic(history, newestMessage) {
+  const topic = detectCustomerTopic(newestMessage);
+  const items = Array.isArray(history) ? history : [];
+
+  if (topic === "CATERING") {
+    return items.filter(item => !/(خصم|discount|rabat|كود\s*(?:خصم|تحقق)|رمز\s*(?:خصم|تحقق))/i.test(String(item.content || ""))).slice(-12);
+  }
+  if (topic === "DISCOUNT") {
+    return items.filter(item => !/(حساسية|allerg|alerg|سمسم|sesame|sezam)/i.test(String(item.content || ""))).slice(-12);
+  }
+  if (topic === "ALLERGY") {
+    return items.filter(item => !/(خصم|discount|rabat|كود\s*(?:خصم|تحقق))/i.test(String(item.content || ""))).slice(-12);
+  }
+  return items.slice(-12);
+}
+
 async function resolveCaseReference(text) {
   const raw = String(text || "");
   const explicit = raw.match(/FL-\d{6}-\d{6}/i)?.[0]?.toUpperCase();
@@ -54,20 +79,44 @@ function stripCaseReference(text) {
   return String(text || "").replace(/FL-\d{6}-\d{6}/ig, "").trim();
 }
 
+function cutInternalTail(payload) {
+  const text = String(payload || "").trim();
+  if (!text) return "";
+
+  const internalTail = /(?:\n|[.;،])\s*(?:داخلي(?:اً|ا)?|ملاحظة(?:\s+داخلية)?|للتفاوض|حد\s+التفاوض|السعر\s+الداخلي|لا\s+ترسل|ولا\s+ترسل|بعدها\s+تفاوض|ثم\s+تفاوض)\b/i;
+  const match = internalTail.exec(text);
+  return (match ? text.slice(0, match.index) : text).trim();
+}
+
 function parseManagementSendCommand(text) {
-  const raw = String(text || "").trim();
-  const sendIntent = /(ابعث|ارسل|أرسل|بلغ|بلّغ|خبر|اخبر|جاوب|رد|قل\s*له|بعت)/i.test(raw);
-  if (!sendIntent) return null;
+  const raw = stripCaseReference(String(text || "").trim());
+  const sendVerb = "(?:ابعث|ارسل|أرسل|بلغ|بلّغ|خبر|اخبر|جاوب|رد|بعت|قل\\s*له)";
+  const explicitCustomer = new RegExp(`${sendVerb}\\s*(?:للزبون|للعميل|له|إله|الو)\\s*[:،,-]?\\s*`, "i");
+  const explicitMatch = explicitCustomer.exec(raw);
+  const hasSendIntent = new RegExp(sendVerb, "i").test(raw);
+  if (!hasSendIntent) return null;
+
   const exact = /(كما هي|مثل ما هي|نفس الكلام|حرفي|بدون تعديل|ولا تعدل|لا تعدل)/i.test(raw);
-  let decision = stripCaseReference(raw)
-    .replace(/^(?:بس\s*)?(?:ابعث|ارسل|أرسل|بلغ|بلّغ|خبر|اخبر|جاوب|رد|بعت)\s*(?:للزبون|للعميل|له|إله|الو)?\s*[:،,-]?\s*/i, "")
-    .trim();
+  let decision = "";
+
+  if (explicitMatch) {
+    decision = cutInternalTail(raw.slice(explicitMatch.index + explicitMatch[0].length));
+  } else {
+    const startsWithSend = new RegExp(`^\\s*(?:بس\\s*)?${sendVerb}\\s*[:،,-]?\\s*`, "i").exec(raw);
+    const looksMultiInstruction = /\n/.test(raw) || /(للتفاوض|حد\s+التفاوض|داخلي|لا\s+ترسل|ولا\s+ترسل|السعر\s+الداخلي)/i.test(raw);
+    if (!startsWithSend || looksMultiInstruction) {
+      return { ambiguous: true, decision: null, exact: false };
+    }
+    decision = cutInternalTail(raw.slice(startsWithSend[0].length));
+  }
+
   if (exact) {
     decision = decision
       .replace(/(?:كما هي|مثل ما هي|نفس الكلام|حرفي(?:اً|ا)?|بدون تعديل|ولا تعدل(?:\s*شي)?|لا تعدل(?:\s*شي)?)/ig, "")
       .trim();
   }
-  return decision ? { decision, exact } : null;
+
+  return decision ? { decision, exact, ambiguous: false } : { ambiguous: true, decision: null, exact: false };
 }
 
 function parseArabicNumberWord(value) {
@@ -254,6 +303,14 @@ async function executeOwnerCommand(from, text) {
   const parsed = parseManagementSendCommand(text);
   if (!parsed) return false;
 
+  if (parsed.ambiguous) {
+    await sendWhatsAppMessage(
+      from,
+      "فهمت أن الرسالة تحتوي تعليمات إدارية وفيها أمر إرسال، لكن لن أحوّل الرسالة كاملة للعميل. حدّد الجزء المخصص للعميل بصيغة: «ابعث للزبون: ...». باقي السعر/التفاوض/الملاحظات ستبقى داخلية."
+    );
+    return true;
+  }
+
   const caseItem = await resolveCaseReference(text);
   if (!caseItem) {
     const open = await storage.getOpenCases();
@@ -294,7 +351,7 @@ async function executeOwnerCommand(from, text) {
     closedBy: from,
     managementDecision: parsed.decision
   });
-  await sendWhatsAppMessage(from, `✅ ${caseItem.id}: تم إرسال الرد للعميل ${caseItem.customerNumber} وإغلاق الحالة.`);
+  await sendWhatsAppMessage(from, `✅ ${caseItem.id}: تم إرسال الجزء المخصص للعميل فقط إلى ${caseItem.customerNumber} وإغلاق الحالة.`);
   return true;
 }
 
@@ -331,7 +388,8 @@ async function handleEvent(req, res) {
     }
 
     if (senderRole === "CUSTOMER") await storage.ensureCustomer(from);
-    const history = await storage.getHistory(from, 12);
+    const rawHistory = await storage.getHistory(from, 12);
+    const history = senderRole === "CUSTOMER" ? filterHistoryForCurrentTopic(rawHistory, text) : rawHistory;
     const result = await generateAgentResult(text, "whatsapp", { history, senderRole, senderNumber: from });
     if (!result) continue;
 
