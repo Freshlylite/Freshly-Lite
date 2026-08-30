@@ -7,6 +7,18 @@ const storage = require("../services/storage");
 const ALERT_DEDUPE_MS = 30 * 60 * 1000;
 const DISCOUNT_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function fallbackCustomerReply(text) {
+  const value = String(text || "");
+  if (/[ąćęłńóśźż]/i.test(value)) return "Przepraszam, mam chwilowy problem techniczny. Twoja wiadomość dotarła — spróbuję ponownie za chwilę.";
+  if (/[а-яё]/i.test(value)) return "Извините, возникла временная техническая проблема. Ваше сообщение получено — попробую ответить снова через минуту.";
+  if (/[A-Za-z]/.test(value) && !/[\u0600-\u06FF]/.test(value)) return "Sorry, I’m having a temporary technical issue. Your message was received — I’ll try again shortly.";
+  return "عذرًا، صار عندي خلل تقني مؤقت. رسالتك وصلت وسأحاول الرد من جديد بعد قليل.";
+}
+
 function normalizePhone(value) {
   return String(value || "").replace(/\D/g, "");
 }
@@ -339,16 +351,42 @@ async function handleEvent(req, res) {
     if (senderRole === "CUSTOMER") await storage.ensureCustomer(from);
     const rawHistory = await storage.getHistory(from, 12);
     const history = senderRole === "CUSTOMER" ? filterHistoryForCurrentTopic(rawHistory, text) : rawHistory;
-    const result = await generateAgentResult(text, "whatsapp", { history, senderRole, senderNumber: from });
-    if (!result) continue;
+
+    let result = null;
+    for (let attempt = 1; attempt <= 2 && !result; attempt++) {
+      result = await generateAgentResult(text, "whatsapp", { history, senderRole, senderNumber: from });
+      if (!result && attempt < 2) {
+        console.warn(`AI reply attempt ${attempt} failed for ${from}; retrying`);
+        await sleep(1500);
+      }
+    }
 
     await storage.addMessage({ phone: from, senderRole, role: "user", content: text, externalMessageId: msg.id || null });
+
+    if (!result) {
+      console.error("AI failed twice; sending fallback instead of leaving customer unanswered", { from, messageId: msg.id });
+      if (senderRole === "CUSTOMER") {
+        const fallback = fallbackCustomerReply(text);
+        const fallbackSent = await sendWhatsAppMessage(from, fallback);
+        if (fallbackSent) {
+          await storage.addMessage({ phone: from, senderRole, role: "assistant", content: fallback });
+        }
+        await sendManagementAlert(`⚠️ خلل تقني في رد الوكيل\nرقم العميل: ${from}\nالرسالة: ${text}\nفشل توليد الرد بعد محاولتين.${fallbackSent ? " تم إرسال رد مؤقت للعميل." : " كما فشل إرسال الرد المؤقت."}`);
+      } else {
+        await sendWhatsAppMessage(from, "⚠️ حصل خلل تقني مؤقت ولم أستطع معالجة رسالتك بعد محاولتين.");
+      }
+      continue;
+    }
 
     if (senderRole === "CUSTOMER") await closeCaseFromCustomerConfirmation(from, text);
 
     if (result.reply) {
       const sent = await sendWhatsAppMessage(from, result.reply);
-      if (sent) await storage.addMessage({ phone: from, senderRole, role: "assistant", content: result.reply });
+      if (sent) {
+        await storage.addMessage({ phone: from, senderRole, role: "assistant", content: result.reply });
+      } else if (senderRole === "CUSTOMER") {
+        await sendManagementAlert(`⚠️ فشل إرسال رد واتساب للعميل\nرقم العميل: ${from}\nالرسالة الواردة: ${text}\nالرد تم توليده لكن WhatsApp API لم ينجح بإرساله.`);
+      }
     }
 
     if (senderRole === "CUSTOMER" && result.managementAlert) {
